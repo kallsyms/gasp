@@ -51,6 +51,61 @@ impl Parser {
 #[cfg(target_arch = "x86_64")]
 impl Parser {
     #[target_feature(enable = "avx2")]
+    unsafe fn parse_value(&mut self) -> Result<JsonValue, JsonError> {
+        self.skip_whitespace();
+
+        match self.peek_byte()? {
+            b'{' => self.parse_object(),
+            b'[' => self.parse_array(),
+            b'"' => {
+                self.pos += 1; // Skip opening quote
+                Ok(JsonValue::String(self.parse_string_content()?))
+            }
+            b't' => self.parse_true(),
+            b'f' => self.parse_false(),
+            b'n' => self.parse_null(),
+            b'0'..=b'9' | b'-' => self.parse_number(),
+            c => Err(JsonError::UnexpectedChar(c as char)),
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_true(&mut self) -> Result<JsonValue, JsonError> {
+        if self.container.len() - self.pos >= 4
+            && &self.container[self.pos..self.pos + 4] == b"true"
+        {
+            self.pos += 4;
+            Ok(JsonValue::Boolean(true))
+        } else {
+            Err(JsonError::UnexpectedChar(self.peek_byte()? as char))
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_false(&mut self) -> Result<JsonValue, JsonError> {
+        if self.container.len() - self.pos >= 5
+            && &self.container[self.pos..self.pos + 5] == b"false"
+        {
+            self.pos += 5;
+            Ok(JsonValue::Boolean(false))
+        } else {
+            Err(JsonError::UnexpectedChar(self.peek_byte()? as char))
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_null(&mut self) -> Result<JsonValue, JsonError> {
+        if self.container.len() - self.pos >= 4
+            && &self.container[self.pos..self.pos + 4] == b"null"
+        {
+            self.pos += 4;
+            Ok(JsonValue::Null)
+        } else {
+            Err(JsonError::UnexpectedChar(self.peek_byte()? as char))
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
     unsafe fn skip_whitespace(&mut self) {
         while self.pos < self.container.len() {
             let remaining = self.container.len() - self.pos;
@@ -277,7 +332,7 @@ impl Parser {
             let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
 
             // Match digits, decimal point, and exponent markers
-            let digits = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'0' as i8));
+            let mut digits = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'0' as i8));
             for i in 1..10 {
                 let digit = _mm256_cmpeq_epi8(input, _mm256_set1_epi8((b'0' + i) as i8));
                 digits = _mm256_or_si256(digits, digit);
@@ -1025,12 +1080,12 @@ mod simd_tests {
             (format!(r#"{{"key": "{}"}}"#, "a".repeat(31)), None),
             // Unterminated string crossing boundary
             (
-                format!(
-                    r#"{{"key": "{}#, "a".repeat(32)), Some(JsonError::UnexpectedEof)),
-           // Invalid escape sequence at boundary
-           (format!(r#"{{"key": "{}\x00"}}"#,
-                    "a".repeat(30)
-                ),
+                format!(r#"{{"key": "{}"#, "a".repeat(32)),
+                Some(JsonError::UnexpectedEof),
+            ),
+            // Invalid escape sequence at boundary
+            (
+                format!(r#"{{"key": "{}\x00"}}"#, "a".repeat(30)),
                 Some(JsonError::InvalidEscape),
             ),
             // Malformed number at boundary
