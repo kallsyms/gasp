@@ -121,9 +121,9 @@ impl Parser {
                         self.pos += pos + 1; // Skip backslash
 
                         // Handle escape sequence
-                        match self.peek_byte() {
+                        match self.peek_byte()? {
                             b'"' | b'\\' | b'/' => {
-                                result.push(self.peek_byte() as char);
+                                result.push(self.peek_byte()? as char);
                                 self.pos += 1;
                             }
                             b'b' => {
@@ -179,7 +179,7 @@ impl Parser {
         self.skip_whitespace();
 
         // Handle empty object
-        if self.peek_byte() == b'}' {
+        if self.peek_byte()? == b'}' {
             self.pos += 1;
             self.stack.pop();
             return Ok(JsonValue::Object(map));
@@ -187,8 +187,8 @@ impl Parser {
 
         loop {
             // Parse key
-            if self.peek_byte() != b'"' {
-                return Err(JsonError::UnexpectedChar(self.peek_byte() as char));
+            if self.peek_byte()? != b'"' {
+                return Err(JsonError::UnexpectedChar(self.peek_byte()? as char));
             }
             self.pos += 1; // Skip opening quote
             let key = self.parse_string_content()?;
@@ -196,7 +196,7 @@ impl Parser {
             self.skip_whitespace();
 
             // Expect colon
-            if self.peek_byte() != b':' {
+            if self.peek_byte()? != b':' {
                 return Err(JsonError::ExpectedColon);
             }
             self.pos += 1;
@@ -209,7 +209,7 @@ impl Parser {
 
             self.skip_whitespace();
 
-            match self.peek_byte() {
+            match self.peek_byte()? {
                 b',' => {
                     self.pos += 1;
                     self.skip_whitespace();
@@ -233,7 +233,7 @@ impl Parser {
         self.skip_whitespace();
 
         // Handle empty array
-        if self.peek_byte() == b']' {
+        if self.peek_byte()? == b']' {
             self.pos += 1;
             self.stack.pop();
             return Ok(JsonValue::Array(array));
@@ -245,7 +245,7 @@ impl Parser {
 
             self.skip_whitespace();
 
-            match self.peek_byte() {
+            match self.peek_byte()? {
                 b',' => {
                     self.pos += 1;
                     self.skip_whitespace();
@@ -265,7 +265,7 @@ impl Parser {
         let start = self.pos;
 
         // Handle negative sign
-        if self.peek_byte() == b'-' {
+        if self.peek_byte()? == b'-' {
             self.pos += 1;
         }
 
@@ -334,145 +334,6 @@ impl Parser {
                 .parse::<i64>()
                 .map_err(|_| JsonError::InvalidNumber("Invalid integer".into()))?;
             Ok(JsonValue::Number(Number::Integer(num)))
-        }
-    }
-
-    unsafe fn peek_byte(&self) -> u8 {
-        *self.container.get(self.pos).unwrap_or(&0)
-    }
-
-    pub fn new(input: Vec<u8>) -> Self {
-        Parser {
-            parser_state: ParserState::InObject,
-            container: Arc::new(input),
-            pos: 0,
-            stack: Vec::new(),
-        }
-    }
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn parse_array(&mut self) -> Result<JsonValue, JsonError> {
-        self.pos += 1; // Skip opening bracket
-        self.stack.push(ParserState::InArray);
-        let mut array = Vec::new();
-
-        self.skip_whitespace();
-
-        // Handle empty array
-        if self.peek_byte() == b']' {
-            self.pos += 1;
-            self.stack.pop();
-            return Ok(JsonValue::Array(array));
-        }
-
-        loop {
-            let value = self.parse_value()?;
-            array.push(value);
-
-            self.skip_whitespace();
-
-            match self.peek_byte() {
-                b',' => {
-                    self.pos += 1;
-                    self.skip_whitespace();
-                }
-                b']' => {
-                    self.pos += 1;
-                    self.stack.pop();
-                    return Ok(JsonValue::Array(array));
-                }
-                _ => return Err(JsonError::ExpectedComma),
-            }
-        }
-    }
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn parse_number(&mut self) -> Result<JsonValue, JsonError> {
-        let start = self.pos;
-
-        // Handle negative sign
-        if self.peek_byte() == b'-' {
-            self.pos += 1;
-        }
-
-        // Use SIMD to find end of number
-        let mut has_decimal = false;
-        let mut has_exponent = false;
-
-        while self.pos < self.container.len() {
-            let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
-
-            // Match digits, decimal point, and exponent markers
-            let digits = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'0' as i8));
-            for i in 1..10 {
-                let digit = _mm256_cmpeq_epi8(input, _mm256_set1_epi8((b'0' + i) as i8));
-                digits = _mm256_or_si256(digits, digit);
-            }
-
-            let decimal = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'.' as i8));
-            let exponent = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'e' as i8));
-            let exp_upper = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'E' as i8));
-
-            let mask = _mm256_movemask_epi8(_mm256_or_si256(
-                digits,
-                _mm256_or_si256(decimal, _mm256_or_si256(exponent, exp_upper)),
-            )) as u32;
-
-            if mask == 0 {
-                break;
-            }
-
-            let pos = mask.trailing_zeros() as usize;
-            match self.container[self.pos + pos] {
-                b'.' if has_decimal => {
-                    return Err(JsonError::InvalidNumber("Multiple decimal points".into()))
-                }
-                b'.' => has_decimal = true,
-                b'e' | b'E' if has_exponent => {
-                    return Err(JsonError::InvalidNumber("Multiple exponents".into()))
-                }
-                b'e' | b'E' => {
-                    has_exponent = true;
-                    // Handle optional +/- after exponent
-                    if self.pos + pos + 1 < self.container.len() {
-                        match self.container[self.pos + pos + 1] {
-                            b'+' | b'-' => self.pos += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            self.pos += pos;
-        }
-
-        let num_str = std::str::from_utf8(&self.container[start..self.pos])
-            .map_err(|_| JsonError::InvalidNumber("Invalid UTF-8".into()))?;
-
-        if has_decimal || has_exponent {
-            let num = num_str
-                .parse::<f64>()
-                .map_err(|_| JsonError::InvalidNumber("Invalid float".into()))?;
-            Ok(JsonValue::Number(Number::Float(num)))
-        } else {
-            let num = num_str
-                .parse::<i64>()
-                .map_err(|_| JsonError::InvalidNumber("Invalid integer".into()))?;
-            Ok(JsonValue::Number(Number::Integer(num)))
-        }
-    }
-
-    unsafe fn peek_byte(&self) -> u8 {
-        *self.container.get(self.pos).unwrap_or(&0)
-    }
-
-    pub fn new(input: Vec<u8>) -> Self {
-        Parser {
-            parser_state: ParserState::InObject,
-            container: Arc::new(input),
-            pos: 0,
-            stack: Vec::new(),
         }
     }
 }
