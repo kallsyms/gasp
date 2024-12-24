@@ -1,6 +1,6 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::json_types::{JsonError, JsonValue, Number};
