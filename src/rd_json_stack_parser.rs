@@ -1,4 +1,4 @@
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 use std::arch::x86_64::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Result<JsonValue, JsonError> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
@@ -48,7 +48,7 @@ impl Parser {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 impl Parser {
     #[target_feature(enable = "avx2")]
     unsafe fn parse_value(&mut self) -> Result<JsonValue, JsonError> {
@@ -109,8 +109,8 @@ impl Parser {
     unsafe fn skip_whitespace(&mut self) {
         while self.pos < self.container.len() {
             let remaining = self.container.len() - self.pos;
+
             if remaining < 32 {
-                // Handle remaining bytes normally
                 while self.pos < self.container.len()
                     && self.container[self.pos].is_ascii_whitespace()
                 {
@@ -120,26 +120,32 @@ impl Parser {
             }
 
             let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
-
-            // Match against space, tab, newline, carriage return
-            let whitespace = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b' ' as i8));
-            let tabs = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\t' as i8));
-            let newlines = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\n' as i8));
-            let crs = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\r' as i8));
-
             let mask = _mm256_movemask_epi8(_mm256_or_si256(
-                _mm256_or_si256(whitespace, tabs),
-                _mm256_or_si256(newlines, crs),
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b' ' as i8)),
+                    _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\t' as i8)),
+                ),
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\n' as i8)),
+                    _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\r' as i8)),
+                ),
             )) as u32;
 
-            // Find first non-whitespace
-            let zeros = mask.trailing_zeros();
-            self.pos += zeros as usize;
-
-            if zeros < 32 {
+            if mask == 0 {
                 return;
             }
+
+            if mask == 0xFFFFFFFF {
+                println!("Full whitespace chunk, advancing 32");
+                self.pos += 32;
+                continue;
+            }
+
+            let leading_whitespace = mask.trailing_ones() as usize;
+            self.pos += leading_whitespace;
+            return;
         }
+        println!("Exited main loop");
     }
 
     #[target_feature(enable = "avx2")]
@@ -318,10 +324,27 @@ impl Parser {
     #[target_feature(enable = "avx2")]
     unsafe fn parse_number(&mut self) -> Result<JsonValue, JsonError> {
         let start = self.pos;
+        println!("Starting number parse at pos: {}", self.pos);
 
-        // Handle negative sign
-        if self.peek_byte()? == b'-' {
-            self.pos += 1;
+        // Validate start of number
+        match self.container[self.pos] {
+            b'-' => {
+                self.pos += 1; // Skip the minus sign
+                if self.pos >= self.container.len() || !self.container[self.pos].is_ascii_digit() {
+                    return Err(JsonError::InvalidNumber("Standalone minus sign".into()));
+                }
+                // Now pos is at the first digit after minus
+            }
+            b'0' => {
+                if self.pos + 1 < self.container.len()
+                    && self.container[self.pos + 1].is_ascii_digit()
+                {
+                    return Err(JsonError::InvalidNumber("Leading zeros not allowed".into()));
+                }
+                // Don't increment pos - let the main loop handle it
+            }
+            b'1'..=b'9' => (), // Don't increment pos
+            _ => return Err(JsonError::InvalidNumber("Invalid number start".into())),
         }
 
         // Use SIMD to find end of number
@@ -329,6 +352,50 @@ impl Parser {
         let mut has_exponent = false;
 
         while self.pos < self.container.len() {
+            if self.pos + 32 > self.container.len() {
+                // Handle remaining bytes one at a time
+                match self.container[self.pos] {
+                    b'.' => {
+                        if has_decimal {
+                            return Err(JsonError::InvalidNumber("Multiple decimal points".into()));
+                        }
+
+                        has_decimal = true; // Set the flag
+
+                        self.pos += 1;
+                        if self.pos + 1 >= self.container.len()
+                            || !self.container[self.pos + 1].is_ascii_digit()
+                        {
+                            break; // Only break if there's no digit after the decimal
+                        }
+                    }
+                    b'0'..=b'9' => self.pos += 1,
+                    b'e' | b'E' => {
+                        if has_exponent {
+                            return Err(JsonError::InvalidNumber("Multiple exponents".into()));
+                        }
+                        has_exponent = true;
+                        match self.container[self.pos + 1] {
+                            b'+' | b'-' => {
+                                if self.pos + 2 >= self.container.len()
+                                    || !self.container[self.pos + 2].is_ascii_digit()
+                                {
+                                    return Err(JsonError::InvalidNumber(
+                                        "Exponent sign must be followed by digit".into(),
+                                    ));
+                                }
+                                self.pos += 2;
+                            }
+                            b'0'..=b'9' => {
+                                self.pos += 1;
+                            }
+                            _ => return Err(JsonError::InvalidNumber("Invalid exponent".into())),
+                        }
+                    }
+                    _ => break,
+                }
+                continue;
+            }
             let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
 
             // Match digits, decimal point, and exponent markers
@@ -347,7 +414,14 @@ impl Parser {
                 _mm256_or_si256(decimal, _mm256_or_si256(exponent, exp_upper)),
             )) as u32;
 
+            println!("SIMD mask: {}, pos: {}", mask, self.pos);
+
             if mask == 0 {
+                if self.container[self.pos - 1] == b'.' {
+                    has_decimal = true;
+                }
+
+                self.pos += 1;
                 break;
             }
 
@@ -356,33 +430,64 @@ impl Parser {
                 b'.' if has_decimal => {
                     return Err(JsonError::InvalidNumber("Multiple decimal points".into()))
                 }
-                b'.' => has_decimal = true,
+                b'.' => {
+                    has_decimal = true;
+                    if self.pos + pos + 1 >= self.container.len()
+                        || !self.container[self.pos + pos + 1].is_ascii_digit()
+                    {
+                        break; // Invalid - decimal at end or not followed by digit
+                    }
+                }
                 b'e' | b'E' if has_exponent => {
                     return Err(JsonError::InvalidNumber("Multiple exponents".into()))
                 }
                 b'e' | b'E' => {
                     has_exponent = true;
-                    // Handle optional +/- after exponent
-                    if self.pos + pos + 1 < self.container.len() {
-                        match self.container[self.pos + pos + 1] {
-                            b'+' | b'-' => self.pos += 1,
-                            _ => {}
+                    // Check what follows the exponent
+                    match self.container[self.pos + pos + 1] {
+                        b'+' | b'-' => {
+                            // After +/- must be at least one digit
+                            if self.pos + pos + 2 >= self.container.len()
+                                || !self.container[self.pos + pos + 2].is_ascii_digit()
+                            {
+                                return Err(JsonError::InvalidNumber(
+                                    "Exponent sign must be followed by digit".into(),
+                                ));
+                            }
                         }
+                        b'0'..=b'9' => (), // This is fine
+                        _ => return Err(JsonError::InvalidNumber("Invalid exponent".into())),
                     }
                 }
                 _ => {}
             }
 
-            self.pos += pos;
+            if pos == 0 {
+                self.pos += 1; // Move at least one position if we found a digit at start
+            } else {
+                self.pos += pos; // Move to where we found the non-digit
+            }
         }
 
         let num_str = std::str::from_utf8(&self.container[start..self.pos])
             .map_err(|_| JsonError::InvalidNumber("Invalid UTF-8".into()))?;
 
+        println!(
+            "Finished number parse at pos: {}, parsed number: {}",
+            self.pos, num_str
+        );
+
         if has_decimal || has_exponent {
+            if self.container[self.pos - 1] == b'.' {
+                return Err(JsonError::InvalidNumber(
+                    "Float cannot end with decimal point".into(),
+                ));
+            }
+
             let num = num_str
                 .parse::<f64>()
                 .map_err(|_| JsonError::InvalidNumber("Invalid float".into()))?;
+
             Ok(JsonValue::Number(Number::Float(num)))
         } else {
             let num = num_str
@@ -816,7 +921,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 mod simd_tests {
     use super::*;
 
@@ -1090,19 +1195,34 @@ mod simd_tests {
             ),
             // Malformed number at boundary
             (
-                format!(r#"{{"key": {}.}}"#, "1".repeat(31)),
-                Some(JsonError::InvalidNumber("Invalid float".into())),
+                format!(r#"{{"key": -{}.}}"#, "1".repeat(31)),
+                Some(JsonError::InvalidNumber(
+                    "Float cannot end with decimal point".into(),
+                )),
             ),
         ];
 
-        for (input, expected_err) in test_cases {
+        for (i, (input, expected_err)) in test_cases.iter().enumerate() {
+            println!("\n=== Starting test case {} ===", i);
+            println!("Input length: {}", input.len());
             let mut parser = Parser::new(input.as_bytes().to_vec());
-            match (parser.parse(), expected_err) {
-                (Ok(_), None) => continue,
-                (Err(e), Some(expected)) => assert_eq!(e, expected),
+            println!("Created parser");
+            let result = parser.parse();
+            println!("Parse completed");
+            println!("Input: {}", input);
+            println!("Expected: {:?}", expected_err);
+            println!("Got: {:?}", result);
+            match (result, expected_err) {
+                (Ok(_), None) => println!("Test case {} passed", i),
+                (Err(e), Some(expected)) => {
+                    assert_eq!(&e, expected);
+                    println!("Test case {} passed", i);
+                }
                 _ => panic!("Unexpected parser result"),
             }
+            println!("=== Completed test case {} ===\n", i);
         }
+        println!("All test cases completed");
     }
 
     #[test]
