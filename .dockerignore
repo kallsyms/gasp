@@ -1,0 +1,33 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Python build artifacts
+*.pyc
+__pycache__/
+*.so
+*.pyd
+*.dll
+*.dylib
+*.egg-info/
+dist/
+build/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment files
+.env
+venv/
+env/ 

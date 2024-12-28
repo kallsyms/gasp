@@ -1,3 +1,16 @@
+// Copyright 2024 The Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -10,10 +23,64 @@ pub enum JsonValue {
     Null,
 }
 
+use std::fmt;
+
+impl fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsonValue::Object(map) => {
+                f.write_str("{")?;
+                let mut first = true;
+                for (key, value) in map {
+                    if !first {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "\"{}\": {}", key, value)?;
+                    first = false;
+                }
+                f.write_str("}")
+            }
+            JsonValue::Array(vec) => {
+                f.write_str("[")?;
+                let mut first = true;
+                for value in vec {
+                    if !first {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", value)?;
+                    first = false;
+                }
+                f.write_str("]")
+            }
+            JsonValue::String(s) => write!(f, "\"{}\"", s.replace('"', "\\\"")),
+            JsonValue::Number(n) => write!(f, "{}", n),
+            JsonValue::Boolean(b) => write!(f, "{}", b),
+            JsonValue::Null => f.write_str("null"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Number {
     Integer(i64),
     Float(f64),
+}
+
+impl fmt::Display for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Number::Integer(i) => write!(f, "{}", i),
+            Number::Float(n) => {
+                let s = n.to_string();
+                // Ensure float numbers are formatted with a decimal point
+                if !s.contains('.') && !s.contains('e') {
+                    write!(f, "{}.0", s)
+                } else {
+                    write!(f, "{}", s)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +95,7 @@ pub enum JsonError {
     ExpectedComma,
     InvalidEscape,
     InvalidString,
+    ReservedKeyword(String),
 }
 
 impl JsonValue {

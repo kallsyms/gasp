@@ -57,15 +57,261 @@ impl Parser {
         match self.peek_byte()? {
             b'{' => self.parse_object(),
             b'[' => self.parse_array(),
-            b'"' => {
+            b'"' | b'\'' => {
+                let quote = self.peek_byte()?;
                 self.pos += 1; // Skip opening quote
-                Ok(JsonValue::String(self.parse_string_content()?))
+                let content = self.parse_string_content_with_quote(quote)?;
+                Ok(JsonValue::String(content))
             }
             b't' => self.parse_true(),
             b'f' => self.parse_false(),
             b'n' => self.parse_null(),
-            b'0'..=b'9' | b'-' => self.parse_number(),
+            b'0'..=b'9' | b'-' | b'.' => self.parse_number(),
+            c if c.is_ascii_alphabetic() => {
+                // Try to parse unquoted string
+                let start = self.pos;
+                let mut in_word = true;
+                let mut word_count = 0;
+
+                while self.pos < self.container.len() {
+                    match self.container[self.pos] {
+                        b',' | b'}' | b']' | b':' => break,
+                        b' ' | b'\n' | b'\t' | b'\r' => {
+                            if in_word {
+                                in_word = false;
+                            }
+                            self.pos += 1;
+                        }
+                        b if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' => {
+                            if !in_word {
+                                word_count += 1;
+                                if word_count > 10 {
+                                    // Limit number of words to prevent runaway parsing
+                                    break;
+                                }
+                                in_word = true;
+                            }
+                            self.pos += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                // Trim trailing whitespace
+                while self.pos > start && self.container[self.pos - 1].is_ascii_whitespace() {
+                    self.pos -= 1;
+                }
+                let content = std::str::from_utf8(&self.container[start..self.pos])
+                    .map_err(|_| JsonError::InvalidString)?;
+                // Don't allow JSON keywords as unquoted strings
+                if content == "true" || content == "false" || content == "null" {
+                    return Err(JsonError::ReservedKeyword(content.to_string()));
+                }
+                Ok(JsonValue::String(content.to_string()))
+            }
             c => Err(JsonError::UnexpectedChar(c as char)),
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_string_content_with_quote(&mut self, quote: u8) -> Result<String, JsonError> {
+        let mut result = String::new();
+        let mut start = self.pos;
+
+        while self.pos < self.container.len() {
+            let remaining = self.container.len() - self.pos;
+            let chunk_size = remaining.min(32);
+
+            if chunk_size < 32 {
+                while self.pos < self.container.len() {
+                    match self.container[self.pos] {
+                        q if q == quote => {
+                            result.push_str(
+                                std::str::from_utf8(&self.container[start..self.pos])
+                                    .map_err(|_| JsonError::InvalidString)?,
+                            );
+                            self.pos += 1;
+                            return Ok(result);
+                        }
+                        b'\\' => {
+                            result.push_str(
+                                std::str::from_utf8(&self.container[start..self.pos])
+                                    .map_err(|_| JsonError::InvalidString)?,
+                            );
+                            self.pos += 1;
+                            self.handle_escape_sequence(&mut result)?;
+                            start = self.pos;
+                        }
+                        _ => self.pos += 1,
+                    }
+                }
+                break;
+            }
+
+            let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
+            let quotes = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(quote as i8));
+            let escapes = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\\' as i8));
+            let mask = _mm256_movemask_epi8(_mm256_or_si256(quotes, escapes)) as u32;
+
+            if mask != 0 {
+                let pos = mask.trailing_zeros() as usize;
+                match self.container[self.pos + pos] {
+                    q if q == quote => {
+                        result.push_str(
+                            std::str::from_utf8(&self.container[start..self.pos + pos])
+                                .map_err(|_| JsonError::InvalidString)?,
+                        );
+                        self.pos += pos + 1;
+                        return Ok(result);
+                    }
+                    b'\\' => {
+                        result.push_str(
+                            std::str::from_utf8(&self.container[start..self.pos + pos])
+                                .map_err(|_| JsonError::InvalidString)?,
+                        );
+                        self.pos += pos + 1;
+                        self.handle_escape_sequence(&mut result)?;
+                        start = self.pos;
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                self.pos += chunk_size;
+            }
+        }
+
+        Err(JsonError::UnexpectedEof)
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_object(&mut self) -> Result<JsonValue, JsonError> {
+        self.pos += 1; // Skip opening brace
+        self.stack.push(ParserState::InObject);
+        let mut map = HashMap::new();
+
+        self.skip_whitespace();
+
+        // Handle empty object
+        if self.peek_byte()? == b'}' {
+            self.pos += 1;
+            self.stack.pop();
+            return Ok(JsonValue::Object(map));
+        }
+
+        loop {
+            self.skip_whitespace();
+
+            // Parse key - handle both quoted and unquoted keys
+            let key = match self.peek_byte()? {
+                b'"' | b'\'' => {
+                    let quote = self.peek_byte()?;
+                    self.pos += 1;
+                    self.parse_string_content_with_quote(quote)?
+                }
+                b if b.is_ascii_lowercase() => {
+                    // Only allow lowercase letters to start an identifier
+                    // Parse unquoted key
+                    let start = self.pos;
+                    while self.pos < self.container.len() {
+                        match self.container[self.pos] {
+                            b':' | b' ' | b'\n' | b'\t' | b'\r' => break,
+                            // Only allow lowercase letters, numbers, underscore, and hyphen in identifiers
+                            b if b.is_ascii_lowercase()
+                                || b.is_ascii_digit()
+                                || b == b'_'
+                                || b == b'-' =>
+                            {
+                                self.pos += 1
+                            }
+                            _ => return Err(JsonError::InvalidString),
+                        }
+                    }
+                    let content = std::str::from_utf8(&self.container[start..self.pos])
+                        .map_err(|_| JsonError::InvalidString)?;
+                    // Don't allow JSON keywords as unquoted identifiers
+                    if content == "true" || content == "false" || content == "null" {
+                        return Err(JsonError::ReservedKeyword(content.to_string()));
+                    }
+                    content.to_string()
+                }
+                c => return Err(JsonError::UnexpectedChar(c as char)),
+            };
+
+            self.skip_whitespace();
+
+            // Expect colon
+            if self.peek_byte()? != b':' {
+                return Err(JsonError::ExpectedColon);
+            }
+            self.pos += 1;
+
+            self.skip_whitespace();
+
+            // Parse value
+            let value = self.parse_value()?;
+            map.insert(key, value);
+
+            self.skip_whitespace();
+
+            match self.peek_byte()? {
+                b',' => {
+                    self.pos += 1;
+                    self.skip_whitespace();
+                    // Allow trailing comma by checking for closing brace
+                    if self.peek_byte()? == b'}' {
+                        self.pos += 1;
+                        self.stack.pop();
+                        return Ok(JsonValue::Object(map));
+                    }
+                }
+                b'}' => {
+                    self.pos += 1;
+                    self.stack.pop();
+                    return Ok(JsonValue::Object(map));
+                }
+                _ => return Err(JsonError::ExpectedComma),
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn parse_array(&mut self) -> Result<JsonValue, JsonError> {
+        self.pos += 1; // Skip opening bracket
+        self.stack.push(ParserState::InArray);
+        let mut array = Vec::new();
+
+        self.skip_whitespace();
+
+        // Handle empty array
+        if self.peek_byte()? == b']' {
+            self.pos += 1;
+            self.stack.pop();
+            return Ok(JsonValue::Array(array));
+        }
+
+        loop {
+            let value = self.parse_value()?;
+            array.push(value);
+
+            self.skip_whitespace();
+
+            match self.peek_byte()? {
+                b',' => {
+                    self.pos += 1;
+                    self.skip_whitespace();
+                    // Allow trailing comma by checking for closing bracket
+                    if self.peek_byte()? == b']' {
+                        self.pos += 1;
+                        self.stack.pop();
+                        return Ok(JsonValue::Array(array));
+                    }
+                }
+                b']' => {
+                    self.pos += 1;
+                    self.stack.pop();
+                    return Ok(JsonValue::Array(array));
+                }
+                _ => return Err(JsonError::ExpectedComma),
+            }
         }
     }
 
@@ -152,20 +398,65 @@ impl Parser {
     unsafe fn parse_string_content(&mut self) -> Result<String, JsonError> {
         let mut result = String::new();
         let mut start = self.pos;
+        println!("Starting parse at position {}", self.pos);
 
         while self.pos < self.container.len() {
-            let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
+            let remaining = self.container.len() - self.pos;
+            let chunk_size = remaining.min(32);
 
+            println!("Remaining bytes: {}, chunk_size: {}", remaining, chunk_size);
+
+            if chunk_size < 32 {
+                println!("Handling final chunk byte-by-byte");
+                while self.pos < self.container.len() {
+                    println!(
+                        "Processing byte at pos {}: {:?}",
+                        self.pos, self.container[self.pos] as char
+                    );
+                    match self.container[self.pos] {
+                        b'"' => {
+                            println!("Found end quote at {}", self.pos);
+                            result.push_str(
+                                std::str::from_utf8(&self.container[start..self.pos])
+                                    .map_err(|_| JsonError::InvalidString)?,
+                            );
+                            self.pos += 1;
+                            return Ok(result);
+                        }
+                        b'\\' => {
+                            println!("Found escape at {}", self.pos);
+                            result.push_str(
+                                std::str::from_utf8(&self.container[start..self.pos])
+                                    .map_err(|_| JsonError::InvalidString)?,
+                            );
+                            self.pos += 1;
+                            self.handle_escape_sequence(&mut result)?;
+                            start = self.pos;
+                        }
+                        _ => self.pos += 1,
+                    }
+                }
+                break;
+            }
+
+            let input = _mm256_loadu_si256(self.container[self.pos..].as_ptr() as *const __m256i);
             let quotes = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'"' as i8));
             let escapes = _mm256_cmpeq_epi8(input, _mm256_set1_epi8(b'\\' as i8));
-
             let mask = _mm256_movemask_epi8(_mm256_or_si256(quotes, escapes)) as u32;
+
+            println!("SIMD MASK: {:#032b}", mask);
 
             if mask != 0 {
                 let pos = mask.trailing_zeros() as usize;
+                println!(
+                    "Found special char at offset {} (absolute pos {})",
+                    pos,
+                    self.pos + pos
+                );
+
                 match self.container[self.pos + pos] {
                     b'"' => {
-                        // Append final chunk
+                        println!("Found end quote");
                         result.push_str(
                             std::str::from_utf8(&self.container[start..self.pos + pos])
                                 .map_err(|_| JsonError::InvalidString)?,
@@ -174,157 +465,83 @@ impl Parser {
                         return Ok(result);
                     }
                     b'\\' => {
-                        // Append chunk before escape
+                        println!("Found escape sequence");
                         result.push_str(
                             std::str::from_utf8(&self.container[start..self.pos + pos])
                                 .map_err(|_| JsonError::InvalidString)?,
                         );
-                        self.pos += pos + 1; // Skip backslash
-
-                        // Handle escape sequence
-                        match self.peek_byte()? {
-                            b'"' | b'\\' | b'/' => {
-                                result.push(self.peek_byte()? as char);
-                                self.pos += 1;
-                            }
-                            b'b' => {
-                                result.push('\u{0008}');
-                                self.pos += 1;
-                            }
-                            b'f' => {
-                                result.push('\u{000C}');
-                                self.pos += 1;
-                            }
-                            b'n' => {
-                                result.push('\n');
-                                self.pos += 1;
-                            }
-                            b'r' => {
-                                result.push('\r');
-                                self.pos += 1;
-                            }
-                            b't' => {
-                                result.push('\t');
-                                self.pos += 1;
-                            }
-                            b'u' => {
-                                self.pos += 1; // Skip 'u'
-                                let hex =
-                                    std::str::from_utf8(&self.container[self.pos..self.pos + 4])
-                                        .map_err(|_| JsonError::InvalidEscape)?;
-                                let code = u16::from_str_radix(hex, 16)
-                                    .map_err(|_| JsonError::InvalidEscape)?;
-                                result.push(
-                                    char::from_u32(code as u32).ok_or(JsonError::InvalidEscape)?,
-                                );
-                                self.pos += 4;
-                            }
-                            _ => return Err(JsonError::InvalidEscape),
-                        }
+                        self.pos += pos + 1;
+                        self.handle_escape_sequence(&mut result)?;
                         start = self.pos;
                     }
                     _ => unreachable!(),
                 }
+            } else {
+                println!("No special chars in chunk, advancing by {}", chunk_size);
+                self.pos += chunk_size;
             }
-            self.pos += 32;
         }
+
+        println!("Reached EOF without finding end quote");
         Err(JsonError::UnexpectedEof)
     }
 
-    #[target_feature(enable = "avx2")]
-    unsafe fn parse_object(&mut self) -> Result<JsonValue, JsonError> {
-        self.pos += 1; // Skip opening brace
-        self.stack.push(ParserState::InObject);
-        let mut map = HashMap::new();
-
-        self.skip_whitespace();
-
-        // Handle empty object
-        if self.peek_byte()? == b'}' {
-            self.pos += 1;
-            self.stack.pop();
-            return Ok(JsonValue::Object(map));
-        }
-
-        loop {
-            // Parse key
-            if self.peek_byte()? != b'"' {
-                return Err(JsonError::UnexpectedChar(self.peek_byte()? as char));
+    fn handle_escape_sequence(&mut self, result: &mut String) -> Result<(), JsonError> {
+        println!("Handling escape sequence at pos {}", self.pos);
+        match self.peek_byte()? {
+            b'"' | b'\\' | b'/' => {
+                println!("Simple escape: {:?}", self.peek_byte()? as char);
+                result.push(self.peek_byte()? as char);
+                self.pos += 1;
             }
-            self.pos += 1; // Skip opening quote
-            let key = self.parse_string_content()?;
-
-            self.skip_whitespace();
-
-            // Expect colon
-            if self.peek_byte()? != b':' {
-                return Err(JsonError::ExpectedColon);
+            b'b' => {
+                println!("Backspace escape");
+                result.push('\u{0008}');
+                self.pos += 1;
             }
-            self.pos += 1;
-
-            self.skip_whitespace();
-
-            // Parse value
-            let value = self.parse_value()?;
-            map.insert(key, value);
-
-            self.skip_whitespace();
-
-            match self.peek_byte()? {
-                b',' => {
-                    self.pos += 1;
-                    self.skip_whitespace();
-                }
-                b'}' => {
-                    self.pos += 1;
-                    self.stack.pop();
-                    return Ok(JsonValue::Object(map));
-                }
-                _ => return Err(JsonError::ExpectedComma),
+            b'f' => {
+                println!("Form feed escape");
+                result.push('\u{000C}');
+                self.pos += 1;
+            }
+            b'n' => {
+                println!("Newline escape");
+                result.push('\n');
+                self.pos += 1;
+            }
+            b'r' => {
+                println!("Carriage return escape");
+                result.push('\r');
+                self.pos += 1;
+            }
+            b't' => {
+                println!("Tab escape");
+                result.push('\t');
+                self.pos += 1;
+            }
+            b'u' => {
+                println!("Unicode escape");
+                self.pos += 1;
+                let hex = std::str::from_utf8(&self.container[self.pos..self.pos + 4])
+                    .map_err(|_| JsonError::InvalidEscape)?;
+                println!("Unicode sequence: {}", hex);
+                let code = u16::from_str_radix(hex, 16).map_err(|_| JsonError::InvalidEscape)?;
+                result.push(char::from_u32(code as u32).ok_or(JsonError::InvalidEscape)?);
+                self.pos += 4;
+            }
+            c => {
+                println!("Invalid escape character: {:?}", c as char);
+                return Err(JsonError::InvalidEscape);
             }
         }
-    }
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn parse_array(&mut self) -> Result<JsonValue, JsonError> {
-        self.pos += 1; // Skip opening bracket
-        self.stack.push(ParserState::InArray);
-        let mut array = Vec::new();
-
-        self.skip_whitespace();
-
-        // Handle empty array
-        if self.peek_byte()? == b']' {
-            self.pos += 1;
-            self.stack.pop();
-            return Ok(JsonValue::Array(array));
-        }
-
-        loop {
-            let value = self.parse_value()?;
-            array.push(value);
-
-            self.skip_whitespace();
-
-            match self.peek_byte()? {
-                b',' => {
-                    self.pos += 1;
-                    self.skip_whitespace();
-                }
-                b']' => {
-                    self.pos += 1;
-                    self.stack.pop();
-                    return Ok(JsonValue::Array(array));
-                }
-                _ => return Err(JsonError::ExpectedComma),
-            }
-        }
+        println!("Escape sequence handled, new pos: {}", self.pos);
+        Ok(())
     }
 
     #[target_feature(enable = "avx2")]
     unsafe fn parse_number(&mut self) -> Result<JsonValue, JsonError> {
         let start = self.pos;
-        println!("Starting number parse at pos: {}", self.pos);
+        // println!("Starting number parse at pos: {}", self.pos);
 
         // Validate start of number
         match self.container[self.pos] {
@@ -352,9 +569,21 @@ impl Parser {
         let mut has_exponent = false;
 
         while self.pos < self.container.len() {
+            // println!("CHAR {}", self.container[self.pos]);
+
+            match self.container[self.pos] {
+                b',' | b']' | b'}' | b' ' | b'\n' | b'\t' | b'\r' => break,
+                _ => {}
+            }
+
             if self.pos + 32 > self.container.len() {
+                println!("FALLBACK");
                 // Handle remaining bytes one at a time
                 match self.container[self.pos] {
+                    b',' => {
+                        println!("COMMAS");
+                        break;
+                    }
                     b'.' => {
                         if has_decimal {
                             return Err(JsonError::InvalidNumber("Multiple decimal points".into()));
@@ -362,12 +591,13 @@ impl Parser {
 
                         has_decimal = true; // Set the flag
 
-                        self.pos += 1;
                         if self.pos + 1 >= self.container.len()
                             || !self.container[self.pos + 1].is_ascii_digit()
                         {
                             break; // Only break if there's no digit after the decimal
                         }
+
+                        self.pos += 1;
                     }
                     b'0'..=b'9' => self.pos += 1,
                     b'e' | b'E' => {
@@ -414,7 +644,7 @@ impl Parser {
                 _mm256_or_si256(decimal, _mm256_or_si256(exponent, exp_upper)),
             )) as u32;
 
-            println!("SIMD mask: {}, pos: {}", mask, self.pos);
+            // println!("SIMD mask: {}, pos: {}", mask, self.pos);
 
             if mask == 0 {
                 if self.container[self.pos - 1] == b'.' {
@@ -426,9 +656,16 @@ impl Parser {
             }
 
             let pos = mask.trailing_zeros() as usize;
+
+            // println!("POS_TRAILING: {}", pos);
             match self.container[self.pos + pos] {
+                b',' => {
+                    println!("COMMAS2");
+                    break;
+                }
                 b'.' if has_decimal => {
-                    return Err(JsonError::InvalidNumber("Multiple decimal points".into()))
+                    println!("Already has decimal returning");
+                    return Err(JsonError::InvalidNumber("Multiple decimal points".into()));
                 }
                 b'.' => {
                     has_decimal = true;
@@ -478,7 +715,9 @@ impl Parser {
         );
 
         if has_decimal || has_exponent {
-            if self.container[self.pos - 1] == b'.' {
+            println!("HERE");
+            if self.container[self.pos] == b'.' {
+                println!("INVALID");
                 return Err(JsonError::InvalidNumber(
                     "Float cannot end with decimal point".into(),
                 ));
@@ -533,27 +772,67 @@ impl Parser {
         match self.peek_byte()? {
             b'{' => self.parse_object_fallback(),
             b'[' => self.parse_array_fallback(),
-            b'"' => self.parse_string_fallback(),
+            b'"' | b'\'' => {
+                let quote = self.peek_byte()?;
+                self.pos += 1;
+                let content = self.parse_string_content_with_quote_fallback(quote)?;
+                Ok(JsonValue::String(content))
+            }
             b't' => self.parse_true_fallback(),
             b'f' => self.parse_false_fallback(),
             b'n' => self.parse_null_fallback(),
-            b'0'..=b'9' | b'-' => self.parse_number_fallback(),
+            b'0'..=b'9' | b'-' | b'.' => self.parse_number_fallback(),
+            c if c.is_ascii_alphabetic() => {
+                // Try to parse unquoted string
+                let start = self.pos;
+                let mut in_word = true;
+                let mut word_count = 0;
+
+                while self.pos < self.container.len() {
+                    match self.container[self.pos] {
+                        b',' | b'}' | b']' | b':' => break,
+                        b' ' | b'\n' | b'\t' | b'\r' => {
+                            if in_word {
+                                in_word = false;
+                            }
+                            self.pos += 1;
+                        }
+                        b if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' => {
+                            if !in_word {
+                                word_count += 1;
+                                if word_count > 10 {
+                                    // Limit number of words to prevent runaway parsing
+                                    break;
+                                }
+                                in_word = true;
+                            }
+                            self.pos += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                // Trim trailing whitespace
+                while self.pos > start && self.container[self.pos - 1].is_ascii_whitespace() {
+                    self.pos -= 1;
+                }
+                let content = std::str::from_utf8(&self.container[start..self.pos])
+                    .map_err(|_| JsonError::InvalidString)?;
+                // Don't allow JSON keywords as unquoted strings
+                if content == "true" || content == "false" || content == "null" {
+                    return Err(JsonError::ReservedKeyword(content.to_string()));
+                }
+                Ok(JsonValue::String(content.to_string()))
+            }
             c => Err(JsonError::UnexpectedChar(c as char)),
         }
     }
 
-    fn parse_string_fallback(&mut self) -> Result<JsonValue, JsonError> {
-        self.pos += 1; // Skip opening quote
-        let content = self.parse_string_content_fallback()?;
-        Ok(JsonValue::String(content))
-    }
-
-    fn parse_string_content_fallback(&mut self) -> Result<String, JsonError> {
+    fn parse_string_content_with_quote_fallback(&mut self, quote: u8) -> Result<String, JsonError> {
         let mut result = String::new();
 
         while self.pos < self.container.len() {
             match self.container[self.pos] {
-                b'"' => {
+                q if q == quote => {
                     self.pos += 1;
                     return Ok(result);
                 }
@@ -621,12 +900,43 @@ impl Parser {
         }
 
         loop {
-            // Parse key
-            if self.peek_byte()? != b'"' {
-                return Err(JsonError::UnexpectedChar(self.peek_byte()? as char));
-            }
-            self.pos += 1;
-            let key = self.parse_string_content_fallback()?;
+            self.skip_whitespace_fallback();
+
+            // Parse key - handle both quoted and unquoted keys
+            let key = match self.peek_byte()? {
+                b'"' | b'\'' => {
+                    let quote = self.peek_byte()?;
+                    self.pos += 1;
+                    self.parse_string_content_with_quote_fallback(quote)?
+                }
+                b if b.is_ascii_lowercase() => {
+                    // Only allow lowercase letters to start an identifier
+                    // Parse unquoted key
+                    let start = self.pos;
+                    while self.pos < self.container.len() {
+                        match self.container[self.pos] {
+                            b':' | b' ' | b'\n' | b'\t' | b'\r' => break,
+                            // Only allow lowercase letters, numbers, underscore, and hyphen in identifiers
+                            b if b.is_ascii_lowercase()
+                                || b.is_ascii_digit()
+                                || b == b'_'
+                                || b == b'-' =>
+                            {
+                                self.pos += 1
+                            }
+                            _ => return Err(JsonError::InvalidString),
+                        }
+                    }
+                    let content = std::str::from_utf8(&self.container[start..self.pos])
+                        .map_err(|_| JsonError::InvalidString)?;
+                    // Don't allow JSON keywords as unquoted identifiers
+                    if content == "true" || content == "false" || content == "null" {
+                        return Err(JsonError::ReservedKeyword(content.to_string()));
+                    }
+                    content.to_string()
+                }
+                c => return Err(JsonError::UnexpectedChar(c as char)),
+            };
 
             if map.contains_key(&key) {
                 return Err(JsonError::DuplicateKey(key));
@@ -652,6 +962,12 @@ impl Parser {
                 b',' => {
                     self.pos += 1;
                     self.skip_whitespace_fallback();
+                    // Allow trailing comma by checking for closing brace
+                    if self.peek_byte()? == b'}' {
+                        self.pos += 1;
+                        self.stack.pop();
+                        return Ok(JsonValue::Object(map));
+                    }
                 }
                 b'}' => {
                     self.pos += 1;
@@ -687,6 +1003,12 @@ impl Parser {
                 b',' => {
                     self.pos += 1;
                     self.skip_whitespace_fallback();
+                    // Allow trailing comma by checking for closing bracket
+                    if self.peek_byte()? == b']' {
+                        self.pos += 1;
+                        self.stack.pop();
+                        return Ok(JsonValue::Array(array));
+                    }
                 }
                 b']' => {
                     self.pos += 1;
@@ -902,12 +1224,14 @@ mod tests {
     fn test_error_cases() {
         let cases = vec![
             ("{", JsonError::UnexpectedEof),
-            ("[1,]", JsonError::UnexpectedChar(']')),
             (
                 r#"{"key": true, "key": false}"#,
                 JsonError::DuplicateKey("key".to_string()),
             ),
-            ("invalid", JsonError::UnexpectedChar('i')),
+            ("@invalid", JsonError::UnexpectedChar('@')),
+            ("{,}", JsonError::UnexpectedChar(',')),
+            ("[,]", JsonError::UnexpectedChar(',')),
+            ("{true:1}", JsonError::ReservedKeyword("true".to_string())),
         ];
 
         for (input, expected_err) in cases {
@@ -918,11 +1242,152 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_unquoted_keys() {
+        let input = r#"{
+            name: "John",
+            age: 30,
+            city: "New York"
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("age").unwrap() {
+                    JsonValue::Number(Number::Integer(n)) => assert_eq!(*n, 30),
+                    _ => panic!("Expected integer for age"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_single_quotes() {
+        let input = r#"{
+            'name': 'John',
+            'nested': {'key': 'value'}
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 2);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("nested").unwrap() {
+                    JsonValue::Object(nested) => {
+                        assert_eq!(nested.get("key").unwrap().as_string().unwrap(), "value");
+                    }
+                    _ => panic!("Expected nested object"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_trailing_commas() {
+        let input = r#"{
+            "array": [1, 2, 3,],
+            "object": {
+                "key": "value",
+            },
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 2);
+                match map.get("array").unwrap() {
+                    JsonValue::Array(arr) => assert_eq!(arr.len(), 3),
+                    _ => panic!("Expected array"),
+                }
+                match map.get("object").unwrap() {
+                    JsonValue::Object(obj) => assert_eq!(obj.len(), 1),
+                    _ => panic!("Expected nested object"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_unquoted_strings() {
+        let input = r#"{
+            "name": John,
+            "status": active,
+            "type": user
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                assert_eq!(map.get("status").unwrap().as_string().unwrap(), "active");
+                assert_eq!(map.get("type").unwrap().as_string().unwrap(), "user");
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_mixed_recovery() {
+        let input = r#"{
+            name: 'John',
+            age: 30,
+            hobbies: [coding, gaming, reading,],
+            address: {
+                city: New York,
+                country: USA,
+            },
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 4);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("age").unwrap() {
+                    JsonValue::Number(Number::Integer(n)) => assert_eq!(*n, 30),
+                    _ => panic!("Expected integer for age"),
+                }
+                match map.get("hobbies").unwrap() {
+                    JsonValue::Array(arr) => {
+                        assert_eq!(arr.len(), 3);
+                        assert_eq!(arr[0].as_string().unwrap(), "coding");
+                        assert_eq!(arr[1].as_string().unwrap(), "gaming");
+                        assert_eq!(arr[2].as_string().unwrap(), "reading");
+                    }
+                    _ => panic!("Expected array for hobbies"),
+                }
+                match map.get("address").unwrap() {
+                    JsonValue::Object(addr) => {
+                        assert_eq!(addr.len(), 2);
+                        assert_eq!(addr.get("city").unwrap().as_string().unwrap(), "New York");
+                        assert_eq!(addr.get("country").unwrap().as_string().unwrap(), "USA");
+                    }
+                    _ => panic!("Expected object for address"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
 }
 
 #[cfg(test)]
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 mod simd_tests {
+    use std::any::type_name;
+
     use super::*;
 
     #[test]
@@ -939,8 +1404,13 @@ mod simd_tests {
     fn test_simd_string_escapes() {
         let input = r#""hello\nworld\t\"quote\"""#.as_bytes().to_vec();
         let mut parser = Parser::new(input);
+
         match parser.parse() {
-            Ok(JsonValue::String(s)) => assert_eq!(s, "hello\nworld\t\"quote\""),
+            Ok(JsonValue::String(s)) => {
+                println!("STRING: {}", s);
+
+                assert_eq!(s, "hello\nworld\t\"quote\"")
+            }
             _ => panic!("Expected string value"),
         }
     }
@@ -1013,6 +1483,10 @@ mod simd_tests {
         }
     }
 
+    fn print_type_of<T>(_: &T) {
+        println!("{}", std::any::type_name::<T>());
+    }
+
     #[test]
     fn test_simd_nested_arrays() {
         // Test deeply nested structure
@@ -1025,9 +1499,11 @@ mod simd_tests {
                 for i in 2..=5 {
                     match current {
                         JsonValue::Array(nested) => {
-                            assert_eq!(nested.len(), 2);
                             if i < 5 {
+                                assert_eq!(nested.len(), 2);
                                 current = &nested[1];
+                            } else {
+                                assert_eq!(nested.len(), 1);
                             }
                         }
                         _ => panic!("Expected nested array"),
@@ -1085,10 +1561,11 @@ mod simd_tests {
         // Create string that's just slightly longer than SIMD register
         // AVX2 is 256 bits = 32 bytes
         let boundary_string = format!(
-            r#"{{ "key": "{}", "value": {} }}"#,
+            r#"{{ "key": "{}", "value": "{}" }}"#,
             "a".repeat(30), // Push the key right up to buffer boundary
             "b".repeat(30)  // And the value across it
         );
+        println!("BOUNDARY: {}", boundary_string);
         let input = boundary_string.as_bytes().to_vec();
         let mut parser = Parser::new(input);
         match parser.parse() {
@@ -1136,7 +1613,9 @@ mod simd_tests {
             nested.push_str("1,[");
         }
         nested.push_str("1");
-        nested.push_str("]".repeat(100).as_str());
+        nested.push_str("]".repeat(101).as_str());
+
+        println!("{}", nested);
 
         let input = nested.as_bytes().to_vec();
         let mut parser = Parser::new(input);
@@ -1166,12 +1645,16 @@ mod simd_tests {
            "{}": null,
            "{}": 42.5
        }}"#,
-            long_key, long_key, long_key, long_key, long_key
-        )
-        .as_bytes()
-        .to_vec();
+            long_key.clone() + "1",
+            long_key.clone() + "2",
+            long_key.clone() + "3",
+            long_key.clone() + "4",
+            long_key.clone() + "5",
+        );
 
-        let mut parser = Parser::new(input);
+        println!("INPUT_STRING: {}", input);
+
+        let mut parser = Parser::new(input.as_bytes().to_vec());
         match parser.parse() {
             Ok(JsonValue::Object(map)) => assert_eq!(map.len(), 5),
             _ => panic!("Expected object"),
@@ -1265,5 +1748,144 @@ mod simd_tests {
         );
         let mut parser = Parser::new(input.as_bytes().to_vec());
         assert!(parser.parse().is_ok());
+    }
+
+    #[test]
+    fn test_simd_unquoted_keys() {
+        let input = r#"{
+            name: "John",
+            age: 30,
+            city: "New York"
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("age").unwrap() {
+                    JsonValue::Number(Number::Integer(n)) => assert_eq!(*n, 30),
+                    _ => panic!("Expected integer for age"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_simd_single_quotes() {
+        let input = r#"{
+            'name': 'John',
+            'nested': {'key': 'value'}
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 2);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("nested").unwrap() {
+                    JsonValue::Object(nested) => {
+                        assert_eq!(nested.get("key").unwrap().as_string().unwrap(), "value");
+                    }
+                    _ => panic!("Expected nested object"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_simd_trailing_commas() {
+        let input = r#"{
+            "array": [1, 2, 3,],
+            "object": {
+                "key": "value",
+            },
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 2);
+                match map.get("array").unwrap() {
+                    JsonValue::Array(arr) => assert_eq!(arr.len(), 3),
+                    _ => panic!("Expected array"),
+                }
+                match map.get("object").unwrap() {
+                    JsonValue::Object(obj) => assert_eq!(obj.len(), 1),
+                    _ => panic!("Expected nested object"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_simd_unquoted_strings() {
+        let input = r#"{
+            "name": John,
+            "status": active,
+            "type": user
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                assert_eq!(map.get("status").unwrap().as_string().unwrap(), "active");
+                assert_eq!(map.get("type").unwrap().as_string().unwrap(), "user");
+            }
+            _ => panic!("Expected object"),
+        }
+    }
+
+    #[test]
+    fn test_simd_mixed_recovery() {
+        let input = r#"{
+            name: 'John',
+            age: 30,
+            hobbies: [coding, gaming, reading,],
+            address: {
+                city: New York,
+                country: USA,
+            },
+        }"#
+        .as_bytes()
+        .to_vec();
+        let mut parser = Parser::new(input);
+        match parser.parse() {
+            Ok(JsonValue::Object(map)) => {
+                assert_eq!(map.len(), 4);
+                assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
+                match map.get("age").unwrap() {
+                    JsonValue::Number(Number::Integer(n)) => assert_eq!(*n, 30),
+                    _ => panic!("Expected integer for age"),
+                }
+                match map.get("hobbies").unwrap() {
+                    JsonValue::Array(arr) => {
+                        assert_eq!(arr.len(), 3);
+                        assert_eq!(arr[0].as_string().unwrap(), "coding");
+                        assert_eq!(arr[1].as_string().unwrap(), "gaming");
+                        assert_eq!(arr[2].as_string().unwrap(), "reading");
+                    }
+                    _ => panic!("Expected array for hobbies"),
+                }
+                match map.get("address").unwrap() {
+                    JsonValue::Object(addr) => {
+                        assert_eq!(addr.len(), 2);
+                        assert_eq!(addr.get("city").unwrap().as_string().unwrap(), "New York");
+                        assert_eq!(addr.get("country").unwrap().as_string().unwrap(), "USA");
+                    }
+                    _ => panic!("Expected object for address"),
+                }
+            }
+            _ => panic!("Expected object"),
+        }
     }
 }
