@@ -12,7 +12,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-
+use std::fmt;
 #[derive(Debug, Clone)]
 pub enum JsonValue {
     Object(HashMap<String, JsonValue>),
@@ -22,8 +22,6 @@ pub enum JsonValue {
     Boolean(bool),
     Null,
 }
-
-use std::fmt;
 
 impl fmt::Display for JsonValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -96,6 +94,12 @@ pub enum JsonError {
     InvalidEscape,
     InvalidString,
     ReservedKeyword(String),
+}
+
+impl fmt::Display for JsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl JsonValue {

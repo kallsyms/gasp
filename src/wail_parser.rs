@@ -1,7 +1,7 @@
-use crate::json_types::{JsonValue, Number};
+use crate::json_types::{JsonError, JsonValue, Number};
 use crate::parser_types::*;
+use crate::rd_json_stack_parser::Parser as JsonParser;
 use crate::types::*;
-
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
@@ -18,6 +18,7 @@ use std::collections::HashMap;
 pub struct WAILParser<'a> {
     registry: RefCell<HashMap<String, WAILField<'a>>>,
     template_registry: RefCell<HashMap<String, WAILTemplateDef<'a>>>,
+    main: RefCell<Option<WAILMainDef<'a>>>,
 }
 
 impl<'a> WAILParser<'a> {
@@ -25,7 +26,91 @@ impl<'a> WAILParser<'a> {
         Self {
             registry: RefCell::new(HashMap::new()),
             template_registry: RefCell::new(HashMap::new()),
+            main: RefCell::new(None),
         }
+    }
+    fn parse_json_like_segment(&'a self, input: &'a str) -> IResult<&'a str, String> {
+        // Skip any non-JSON text until we find a JSON-like start
+        let (input, _) = many0(alt((
+            preceded(multispace0, take_until("{")),
+            preceded(multispace1, take_while1(|c| c != '{')),
+        )))(input)?;
+
+        let mut depth = 0;
+        let mut json_chars = Vec::new();
+        let mut chars = input.chars().peekable();
+        let mut pos = 0;
+
+        while let Some(&c) = chars.peek() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    json_chars.push(c);
+                }
+                '}' => {
+                    depth -= 1;
+                    json_chars.push(c);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => json_chars.push(c),
+            }
+            chars.next();
+            pos += 1;
+        }
+
+        let json_str: String = json_chars.into_iter().collect();
+        Ok((&input[pos..], json_str))
+    }
+
+    fn parse_llm_output(&'a self, input: &'a str) -> Result<HashMap<String, JsonValue>, String> {
+        // First get the ordered list of variable names from main statements
+        let var_names: Vec<String> = self
+            .main
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                MainStatement::Assignment { variable, .. } => Some(variable.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Parse the JSON-like segments
+        let (_, segments) = many0(|input| self.parse_json_like_segment(input))(input)
+            .map_err(|e| format!("Failed to parse segments: {:?}", e))?;
+
+        if segments.len() != var_names.len() {
+            return Err(format!(
+                "Found {} JSON segments but expected {} based on template variables",
+                segments.len(),
+                var_names.len()
+            ));
+        }
+
+        // Try to parse each segment and build the map
+        let mut result = HashMap::new();
+        for (var_name, segment) in var_names.into_iter().zip(segments) {
+            let mut parser = JsonParser::new(segment.as_bytes().to_vec());
+            let json_value = parser
+                .parse()
+                .map_err(|e| format!("Failed to parse JSON for {}: {}", var_name, e))?;
+            result.insert(var_name, json_value);
+        }
+
+        Ok(result)
+    }
+
+    pub fn prepare_prompt(&self) -> String {
+        self.main
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .interpolate_prompt(&self.template_registry.borrow())
+            .unwrap()
     }
 
     pub fn parse_wail_file(&'a self, input: &'a str) -> IResult<&'a str, Vec<WAILDefinition<'a>>> {
@@ -303,6 +388,13 @@ impl<'a> WAILParser<'a> {
     }
 
     fn parse_main(&'a self, input: &'a str) -> IResult<&'a str, WAILMainDef<'a>> {
+        if self.main.borrow().is_some() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Alt,
+            )));
+        }
+
         // Parse main opening
         let (input, _) = tuple((tag("main"), multispace0, char('{'), multispace0))(input)?;
 
@@ -368,10 +460,11 @@ impl<'a> WAILParser<'a> {
         // Parse main's closing brace
         let (input, _) = tuple((char('}'), multispace0))(input)?;
 
-        Ok((
-            input,
-            WAILMainDef::new(statements, prompt_str.trim().to_string()),
-        ))
+        let main = WAILMainDef::new(statements, prompt_str.trim().to_string());
+
+        self.main.borrow_mut().replace(main.clone());
+
+        Ok((input, main))
     }
 
     fn parse_annotation(&'a self, input: &'a str) -> IResult<&'a str, WAILAnnotation> {
@@ -413,6 +506,17 @@ impl<'a> WAILParser<'a> {
                 nom::error::ErrorKind::Alt,
             )))
         }
+    }
+
+    pub fn validate_json(&self, json: &str) -> Result<(), String> {
+        let mut parser = JsonParser::new(json.as_bytes().to_vec());
+        let value = parser.parse().map_err(|e| e.to_string())?;
+
+        self.main
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .validate_llm_response(&value, &self.registry.borrow())
     }
 
     pub fn validate(&self) -> (Vec<ValidationWarning>, Vec<ValidationError>) {
@@ -910,7 +1014,7 @@ Return in this format: {{return_type}}"#
         }
 
         // Verify GetPersonFromDescription template
-        let template = match &definitions[1] {
+        let _template = match &definitions[1] {
             WAILDefinition::Template(template) => {
                 assert_eq!(template.name, "GetPersonFromDescription");
                 assert_eq!(template.inputs.len(), 1);
@@ -940,9 +1044,8 @@ Return in this format: {{return_type}}"#
                 assert_eq!(call2.arguments.len(), 1);
 
                 // Test prompt interpolation
-                let mut template_registry = HashMap::new();
-                template_registry.insert(template.name.clone(), template.clone());
-                let interpolated = main.interpolate_prompt(&template_registry).unwrap();
+                let registry = parser.template_registry.borrow().clone();
+                let interpolated = main.interpolate_prompt(&registry).unwrap();
 
                 println!("Interpolated prompt:\n{}", interpolated);
                 assert!(interpolated.contains("Given this description of a person:"));

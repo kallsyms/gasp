@@ -6,6 +6,7 @@ edition = "2021"
 [lib]
 name = "gasp"
 crate-type = ["cdylib"]  # Needed for Python bindings
+path = "src/lib.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
