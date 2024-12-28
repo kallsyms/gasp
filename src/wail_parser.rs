@@ -64,7 +64,10 @@ impl<'a> WAILParser<'a> {
         Ok((&input[pos..], json_str))
     }
 
-    fn parse_llm_output(&'a self, input: &'a str) -> Result<HashMap<String, JsonValue>, String> {
+    pub fn parse_llm_output(
+        &'a self,
+        input: &'a str,
+    ) -> Result<HashMap<String, JsonValue>, String> {
         // First get the ordered list of variable names from main statements
         let var_names: Vec<String> = self
             .main
