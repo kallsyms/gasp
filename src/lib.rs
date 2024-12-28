@@ -165,6 +165,12 @@ impl WAILGenerator {
                     PyValueError::new_err(format!("Failed to parse LLM output: {:?}", e))
                 })?;
 
+                parser
+                    .validate_json(&parsed_output.to_string())
+                    .map_err(|e| {
+                        PyValueError::new_err(format!("Failed to validate LLM output: {:?}", e))
+                    })?;
+
                 Ok((warning_strs, error_strs))
             }
             Err(e) => Err(PyValueError::new_err(format!(
