@@ -14,6 +14,41 @@ use nom::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+fn count_leading_whitespace(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+fn adjust_indentation(content: &str, target_indent: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // Find initial whitespace amount from first non-empty line
+    let initial_indent = lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| count_leading_whitespace(line))
+        .unwrap_or(0);
+
+    // Calculate how much to adjust by
+    let indent_adjustment = initial_indent.saturating_sub(target_indent);
+
+    // Adjust each line
+    lines
+        .iter()
+        .map(|line| {
+            let current_indent = count_leading_whitespace(line);
+            if current_indent >= indent_adjustment {
+                &line[indent_adjustment..]
+            } else {
+                line.trim_start()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug)]
 pub struct WAILParser<'a> {
     registry: RefCell<HashMap<String, WAILField<'a>>>,
@@ -30,11 +65,22 @@ impl<'a> WAILParser<'a> {
         }
     }
     fn parse_json_like_segment(&'a self, input: &'a str) -> IResult<&'a str, String> {
+        let (input, _) = multispace0(input)?;
+
+        if input.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+
         // Skip any non-JSON text until we find a JSON-like start
-        let (input, _) = many0(alt((
+        let (input, _) = alt((
+            take_until("{"),
+            take_while1(|c| c != '{'),
             preceded(multispace0, take_until("{")),
             preceded(multispace1, take_while1(|c| c != '{')),
-        )))(input)?;
+        ))(input)?;
 
         let mut depth = 0;
         let mut json_chars = Vec::new();
@@ -51,6 +97,7 @@ impl<'a> WAILParser<'a> {
                     depth -= 1;
                     json_chars.push(c);
                     if depth == 0 {
+                        pos += 1;
                         break;
                     }
                 }
@@ -75,6 +122,19 @@ impl<'a> WAILParser<'a> {
             .iter()
             .filter_map(|stmt| match stmt {
                 MainStatement::Assignment { variable, .. } => Some(variable.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let direct_calls: Vec<String> = self
+            .main
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                MainStatement::TemplateCall(call) => Some(call.template_name.clone()),
                 _ => None,
             })
             .collect();
@@ -115,8 +175,13 @@ impl<'a> WAILParser<'a> {
 
     pub fn parse_wail_file(&'a self, input: &'a str) -> IResult<&'a str, Vec<WAILDefinition<'a>>> {
         let (input, _) = multispace0(input)?;
-        let (input, mut definitions) =
-            separated_list0(multispace1, |input| self.parse_definition(input))(input)?;
+        let (input, mut definitions) = separated_list0(
+            multispace1,
+            alt((
+                |input| self.parse_definition(input),
+                |input| self.parse_comment(input),
+            )),
+        )(input)?;
         let (input, _) = multispace0(input)?;
 
         // Parse optional main block at the end
@@ -126,6 +191,11 @@ impl<'a> WAILParser<'a> {
         } else {
             Ok((input, definitions))
         }
+    }
+
+    fn parse_comment(&'a self, input: &'a str) -> IResult<&'a str, WAILDefinition<'a>> {
+        let (input, _) = tuple((multispace0, tag("#"), multispace0, take_until("\n")))(input)?;
+        Ok((input, WAILDefinition::Comment(input.to_string())))
     }
 
     fn parse_object(&'a self, input: &'a str) -> IResult<&'a str, WAILField<'a>> {
@@ -303,6 +373,8 @@ impl<'a> WAILParser<'a> {
         let (input, template) =
             delimited(tag(r#"""""#), take_until(r#"""""#), tag(r#"""""#))(input)?;
 
+        let template_adjusted = adjust_indentation(&template, 0);
+
         let (input, _) = tuple((multispace0, char('}')))(input)?;
 
         // Create output field for both registered and unregistered types
@@ -316,7 +388,7 @@ impl<'a> WAILParser<'a> {
             name: name.to_string(),
             inputs: params,
             output: output_field,
-            prompt_template: template.trim().to_string(),
+            prompt_template: template_adjusted,
             annotations,
         };
 
@@ -403,7 +475,7 @@ impl<'a> WAILParser<'a> {
             let (i, statement) = alt((
                 |input| {
                     // Parse assignment: let var = template_call;
-                    let (input, _) = tuple((tag("let"), multispace1))(input)?;
+                    let (input, _) = tuple((multispace0, tag("let"), multispace1))(input)?;
                     let (input, var_name) = self.identifier(input)?;
                     let (input, _) = tuple((multispace0, char('='), multispace0))(input)?;
                     let (input, template_call) = self.parse_template_call(input)?;
@@ -422,6 +494,13 @@ impl<'a> WAILParser<'a> {
                     let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                     Ok((input, MainStatement::TemplateCall(template_call)))
                 },
+                |input: &'a str| {
+                    // Parse comment: # comment
+                    let (input, (_, _, _, comment)) =
+                        tuple((multispace0, tag("#"), multispace0, take_until("\n")))(input)?;
+
+                    Ok((input, MainStatement::Comment(comment.to_string())))
+                },
             ))(i)?;
             Ok((i, statement))
         })(input)?;
@@ -432,7 +511,7 @@ impl<'a> WAILParser<'a> {
             tag("prompt"),
             multispace0,
             char('{'),
-            multispace0,
+            // multispace0,
         ))(input)?;
 
         // Take everything until the closing brace of prompt, handling nested braces
@@ -460,7 +539,14 @@ impl<'a> WAILParser<'a> {
         // Parse main's closing brace
         let (input, _) = tuple((char('}'), multispace0))(input)?;
 
-        let main = WAILMainDef::new(statements, prompt_str.trim().to_string());
+        let prompt_str_trimmed = prompt_str
+            .to_string()
+            .lines()
+            .map(|line| line.trim())
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        let main = WAILMainDef::new(statements, prompt_str_trimmed);
 
         self.main.borrow_mut().replace(main.clone());
 
@@ -516,7 +602,7 @@ impl<'a> WAILParser<'a> {
             .borrow()
             .as_ref()
             .unwrap()
-            .validate_llm_response(&value, &self.registry.borrow())
+            .validate_llm_response(&value, &self.template_registry.borrow())
     }
 
     pub fn validate(&self) -> (Vec<ValidationWarning>, Vec<ValidationError>) {
@@ -526,12 +612,7 @@ impl<'a> WAILParser<'a> {
         let template_registry = self.template_registry.borrow();
 
         // Check if there's a main block
-        let has_main = self
-            .template_registry
-            .borrow()
-            .iter()
-            .any(|(name, _)| name == "main");
-        if !has_main {
+        if self.main.borrow().is_none() {
             warnings.push(ValidationWarning::NoMainBlock);
         }
 
@@ -667,6 +748,7 @@ pub enum WAILDefinition<'a> {
     Object(WAILField<'a>),
     Template(WAILTemplateDef<'a>),
     Main(WAILMainDef<'a>),
+    Comment(String),
 }
 
 #[derive(Debug, Clone)]
@@ -690,6 +772,10 @@ pub enum ValidationError {
         type_name: String,
         is_return_type: bool,
     },
+    // SyntaxError {
+    //     statement: String,
+    //     error: String,
+    // },
 }
 
 // Add test that tries parsing a basic object
@@ -951,9 +1037,12 @@ Return in this format: {{return_type}}"#
         };
 
         let mut inputs = HashMap::new();
-        inputs.insert("date_string".to_string(), "January 1st, 2024".to_string());
+        inputs.insert(
+            "date_string".to_string(),
+            TemplateArgument::String("January 1st, 2024".to_string()),
+        );
 
-        let final_prompt = template.interpolate_prompt().unwrap();
+        let final_prompt = template.interpolate_prompt(Some(&inputs)).unwrap();
         println!("Final prompt:\n{}", final_prompt);
     }
 

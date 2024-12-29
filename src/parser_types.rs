@@ -30,6 +30,7 @@ pub enum MainStatement {
         template_call: WAILTemplateCall,
     },
     TemplateCall(WAILTemplateCall),
+    Comment(String),
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +112,12 @@ impl<'a> WAILMainDef<'a> {
                 .ok_or_else(|| format!("Template not found: {}", template_call.template_name))?;
 
             // Replace the placeholder with the template's prompt
-            result = result.replace(&full_match, &template.prompt_template);
+            result = result.replace(
+                &full_match,
+                &template
+                    .interpolate_prompt(Some(&template_call.arguments))
+                    .unwrap(),
+            );
         }
 
         Ok(result)
@@ -120,7 +126,7 @@ impl<'a> WAILMainDef<'a> {
     pub fn validate_llm_response(
         &self,
         json: &JsonValue,
-        registry: &HashMap<String, WAILField<'a>>,
+        registry: &HashMap<String, WAILTemplateDef<'a>>,
     ) -> Result<(), String> {
         // For each template call in statements, validate its output
         for statement in &self.statements {
@@ -130,10 +136,11 @@ impl<'a> WAILMainDef<'a> {
                     template_call,
                 } => {
                     // Get the template's output type from registry
-                    let template_output =
-                        registry.get(&template_call.template_name).ok_or_else(|| {
-                            format!("Template not found: {}", template_call.template_name)
-                        })?;
+                    let template = registry.get(&template_call.template_name).ok_or_else(|| {
+                        format!("Template not found: {}", template_call.template_name)
+                    })?;
+
+                    let template_output = &template.output;
 
                     // Get the corresponding value from JSON response
                     let value = match json {
@@ -148,12 +155,27 @@ impl<'a> WAILMainDef<'a> {
                 }
                 MainStatement::TemplateCall(template_call) => {
                     // Similar validation for direct template calls
-                    let template_output =
-                        registry.get(&template_call.template_name).ok_or_else(|| {
-                            format!("Template not found: {}", template_call.template_name)
-                        })?;
-                    template_output.field_type.validate_json(json)?;
+                    let template = registry.get(&template_call.template_name).ok_or_else(|| {
+                        format!("Template not found: {}", template_call.template_name)
+                    })?;
+
+                    // Get the corresponding value from JSON response
+                    let value = match json {
+                        JsonValue::Object(map) => {
+                            map.get(&template_call.template_name).ok_or_else(|| {
+                                format!(
+                                    "Missing output for template call: {}",
+                                    template_call.template_name
+                                )
+                            })?
+                        }
+                        _ => return Err("Expected object response from LLM".to_string()),
+                    };
+
+                    let template_output = &template.output;
+                    template_output.field_type.validate_json(value)?;
                 }
+                MainStatement::Comment(_) => {}
             }
         }
         Ok(())
@@ -179,23 +201,55 @@ impl MainStatement {
     }
 }
 
+fn count_leading_whitespace(s: &str) -> usize {
+    s.chars().take_while(|c| c.is_whitespace()).count()
+}
+
 impl<'a> WAILTemplateDef<'a> {
-    pub fn interpolate_prompt(&self) -> Result<String, String> {
+    pub fn interpolate_prompt(
+        &self,
+        arguments: Option<&HashMap<String, TemplateArgument>>,
+    ) -> Result<String, String> {
         let mut prompt = self.prompt_template.clone();
 
-        // Replace input parameters with their schema
+        // Replace input parameters with their schema type or actual values
         for input in &self.inputs {
-            println!("input: {}", input.name);
             let placeholder = format!("{{{{{}}}}}", input.name);
             if !prompt.contains(&placeholder) {
                 return Err(format!("Missing placeholder for input: {}", input.name));
             }
-            prompt = prompt.replace(&placeholder, &input.field_type.to_schema());
+
+            if let Some(arguments) = arguments {
+                let argument = arguments.get(&input.name).unwrap();
+                prompt = prompt.replace(&placeholder, &argument.to_string());
+            } else {
+                prompt = prompt.replace(&placeholder, &input.field_type.to_schema());
+            }
         }
 
-        // Replace return type with schema
-        let return_type_schema = self.output.field_type.to_schema();
-        prompt = prompt.replace("{{return_type}}", &return_type_schema);
+        // Handle return type with proper indentation
+        let re = regex::Regex::new(r"\{\{return_type\}\}").unwrap();
+        if let Some(cap) = re.find(&prompt) {
+            // Get the line containing return_type
+            let line_start = prompt[..cap.start()].rfind('\n').map_or(0, |i| i + 1);
+            let indent = count_leading_whitespace(&prompt[line_start..cap.start()]);
+
+            let return_type_schema = self.output.field_type.to_schema();
+            let indented_schema = return_type_schema
+                .lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    if i == 0 {
+                        line.to_string()
+                    } else {
+                        format!("{}{}", " ".repeat(indent), line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            prompt = re.replace(&prompt, &indented_schema).to_string();
+        }
 
         Ok(prompt)
     }
@@ -240,18 +294,24 @@ mod tests {
             },
         ];
 
-        let person_type = WAILField {
-            name: "GetPersonFromDescription".to_string(),
-            field_type: WAILType::Composite(WAILCompositeType::Object(WAILObject {
-                value: HashMap::new(),
-                type_data: WAILTypeData {
-                    json_type: JsonValue::Object(HashMap::new()),
-                    type_name: "Person",
-                    field_definitions: Some(person_fields),
-                    element_type: None,
-                },
-            })),
+        let person_type = WAILTemplateDef {
+            name: "Person".to_string(),
+            inputs: vec![],
+            prompt_template: "".to_string(),
             annotations: vec![],
+            output: WAILField {
+                name: "name".to_string(),
+                field_type: WAILType::Simple(WAILSimpleType::String(WAILString {
+                    value: String::new(),
+                    type_data: WAILTypeData {
+                        json_type: JsonValue::String(String::new()),
+                        type_name: "String",
+                        field_definitions: None,
+                        element_type: None,
+                    },
+                })),
+                annotations: vec![],
+            },
         };
 
         // Create registry with the template

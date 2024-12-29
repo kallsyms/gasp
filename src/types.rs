@@ -57,11 +57,19 @@ impl<'a> WAILType<'a> {
                     let mut schema = String::from("\n{\n");
                     if let Some(fields) = &obj.type_data.field_definitions {
                         for field in fields {
-                            schema.push_str(&format!(
-                                "  {}: {}\n",
-                                field.name,
-                                field.field_type.to_schema()
-                            ));
+                            if field.field_type.element_type().is_some() {
+                                schema.push_str(&format!(
+                                    "  {}: {}[]>\n",
+                                    field.name,
+                                    field.field_type.element_type().unwrap()
+                                ));
+                            } else {
+                                schema.push_str(&format!(
+                                    "  {}: {}\n",
+                                    field.name,
+                                    field.field_type.to_schema()
+                                ));
+                            }
                         }
                     }
                     schema.push('}');

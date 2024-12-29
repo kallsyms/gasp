@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-from gasp import WAILValidator
+from gasp import WAILGenerator
 
 def main():
     # Create a validator
-    validator = WAILValidator()
+    generator = WAILGenerator()
 
     # Load a WAIL schema with an intentional typo
     wail_schema = '''
@@ -20,12 +20,22 @@ template GetPersonFromDescription(description: String) -> Person {
     Return in this format: {{return_type}}
     """
 }
+
+main {
+    let person_prompt = GetPersonFromDescription(
+        description: "Alice is a 25-year-old software engineer who loves coding, AI, and hiking."
+    );
+
+    prompt {
+        {{person_prompt}}
+    }
+}
 '''
 
-    validator.load_wail(wail_schema)
+    generator.load_wail(wail_schema)
 
     # Validate the schema
-    warnings, errors = validator.validate()
+    warnings, errors = generator.validate_wail()
 
     print("Validation Results:")
     print("\nWarnings:")
