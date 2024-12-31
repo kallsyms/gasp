@@ -9,6 +9,22 @@ WAIL (Widely Applicable Interface Language) is a schema language designed for:
 2. Validating JSON responses from LLMs
 3. Providing clear error messages for schema violations
 
+## Why
+
+In our expereince the ergonomics around tool calling kind of suck right now and in the lowest common denominator settings are down right painful.
+
+If you're using OpenRouter (which is great) they choose not to support some platform specific features (understandable) like the "ANY" parameter from Anthropic so you wind up with super verbose output, the occasional no tool call, missing params even when specified in "required" and so we decided to implement this prompt creator and schema validator because what are tool calls other than type interfaces. 
+
+Honestly, [BAML](https://github.com/BoundaryML/baml) is a really sick tool and more feature complete than this, with like people actually paid to work on it, and outside of the minimal needs we have that this was created for you should go use them. 
+
+However, they require you to use their code gen'd inference clients for sending messages to the LLM. That let's them do some really powerful things like validation mid streaming, but you have to be all in on them.
+
+GASP and WAIL let you separate out prompt creation, inference and prompt validation from one another so you can apply GASP to whatever client floats your boat with the trade off that we aren't intending to make this work for every streaming format under the sun (at least I'm not, feel free to contribute!) so it's only applicable to fully generated outputs.
+
+I didn't need all that especially because I along with my friend and co-founder have written [Asimov](https://github.com/BismuthCloud/asimov/tree/main) a framework for building Agents that includes all of our own inference machinery I'm not looking to give up.
+
+Anyway both Asimov and now GASP/WAIL are built for supporting [Bismuth](https://waitlist.bismuth.sh) a programming agent that can help businesses find and patch bugs on your Github PRs before you ever know about them. 
+
 ## Features
 
 - **Robust Error Recovery**: Handles common LLM response issues like trailing commas, unquoted identifiers, and malformed JSON
@@ -16,6 +32,12 @@ WAIL (Widely Applicable Interface Language) is a schema language designed for:
 - **High Performance**: Written in Rust with Python bindings for optimal speed
 - **Developer Friendly**: Clear error messages and intuitive schema syntax
 - **LLM-Optimized**: Specifically designed to work with the quirks and inconsistencies of LLM outputs
+
+## Anti-Features
+- **Non existant syntax error messages** - I will get around to this soon but right now this is just as likely to segfault or die in rust with a cryptic error message as it is to tell you what you're doing is wrong.
+
+## Caveats
+- **Output parsing is assumed to be sequential** - That is we assume output happens in the same order as the template variable binding so like if binding1 doesn't correspond to output1 things will be wacky.
 
 ## Installation
 

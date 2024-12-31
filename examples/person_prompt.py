@@ -91,9 +91,9 @@ def main():
         print(f"Age: {result['age']}")
         print(f"Interests: {', '.join(result['interests'])}")
         
-        # # You can also convert it to standard JSON
-        # print("\nAs standard JSON:")
-        # print(json.dumps(result, indent=2))
+        # You can also convert it to standard JSON
+        print("\nAs standard JSON:")
+        print(json.dumps(result, indent=2))
         
     except Exception as e:
         print(f"❌ Validation error: {e}")
