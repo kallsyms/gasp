@@ -6,7 +6,18 @@ use std::marker::PhantomData;
 
 #[derive(Debug, Clone)]
 pub enum WAILAnnotation {
-    Description(String),
+    Description(String), // Detailed explanation of purpose/meaning
+    Example(String),     // Concrete examples of valid values/usage
+    Validation(String),  // Rules about what makes a valid value
+    Format(String),      // Expected text format or structure
+    Important(String),   // Critical information the LLM should pay special attention to
+    Context(String),     // Additional context about where/how this is used
+    Default(String),     // Default/fallback value if not specified
+    Field {
+        // Field level annotations
+        name: String,
+        annotations: Vec<WAILAnnotation>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +251,7 @@ impl<'a> WAILTemplateDef<'a> {
     ) -> Result<String, String> {
         let mut prompt = self.prompt_template.clone();
 
-        // Replace input parameters with their schema type or actual values
+        // Handle input parameters
         for input in &self.inputs {
             let placeholder = format!("{{{{{}}}}}", input.name);
             if !prompt.contains(&placeholder) {
@@ -251,7 +262,93 @@ impl<'a> WAILTemplateDef<'a> {
                 let argument = arguments.get(&input.name).unwrap();
                 prompt = prompt.replace(&placeholder, &argument.to_string());
             } else {
-                prompt = prompt.replace(&placeholder, &input.field_type.to_schema());
+                let mut param_info = String::new();
+
+                // Add schema
+                param_info.push_str(&input.field_type.to_schema());
+
+                // Group annotations by field
+                let mut field_annotations: HashMap<String, Vec<&WAILAnnotation>> = HashMap::new();
+                let mut general_annotations = Vec::new();
+
+                for annotation in &input.annotations {
+                    match annotation {
+                        WAILAnnotation::Field { name, annotations } => {
+                            field_annotations
+                                .entry(name.clone())
+                                .or_default()
+                                .extend(annotations.iter());
+                        }
+                        _ => general_annotations.push(annotation),
+                    }
+                }
+
+                // Add general annotations
+                if !general_annotations.is_empty() {
+                    param_info.push_str("\n# General:\n");
+                    for annotation in &general_annotations {
+                        match annotation {
+                            WAILAnnotation::Description(desc) => {
+                                param_info.push_str(&format!("# {}\n", desc));
+                            }
+                            WAILAnnotation::Example(ex) => {
+                                param_info.push_str(&format!("# Example: {}\n", ex));
+                            }
+                            WAILAnnotation::Validation(rule) => {
+                                param_info.push_str(&format!("# Validation: {}\n", rule));
+                            }
+                            WAILAnnotation::Format(fmt) => {
+                                param_info.push_str(&format!("# Format: {}\n", fmt));
+                            }
+                            WAILAnnotation::Important(note) => {
+                                param_info.push_str(&format!("# Important: {}\n", note));
+                            }
+                            WAILAnnotation::Context(ctx) => {
+                                param_info.push_str(&format!("# Context: {}\n", ctx));
+                            }
+                            WAILAnnotation::Default(def) => {
+                                param_info.push_str(&format!("# Default: {}\n", def));
+                            }
+                            WAILAnnotation::Field { .. } => unreachable!(),
+                        }
+                    }
+                }
+
+                // Add field-specific annotations
+                if !field_annotations.is_empty() {
+                    param_info.push_str("\n# Field Requirements:\n");
+                    for (field_name, annotations) in field_annotations {
+                        param_info.push_str(&format!("# For {}:\n", field_name));
+                        for annotation in annotations {
+                            match annotation {
+                                WAILAnnotation::Description(desc) => {
+                                    param_info.push_str(&format!("#   {}\n", desc));
+                                }
+                                WAILAnnotation::Example(ex) => {
+                                    param_info.push_str(&format!("#   Example: {}\n", ex));
+                                }
+                                WAILAnnotation::Validation(rule) => {
+                                    param_info.push_str(&format!("#   Validation: {}\n", rule));
+                                }
+                                WAILAnnotation::Format(fmt) => {
+                                    param_info.push_str(&format!("#   Format: {}\n", fmt));
+                                }
+                                WAILAnnotation::Important(note) => {
+                                    param_info.push_str(&format!("#   Important: {}\n", note));
+                                }
+                                WAILAnnotation::Context(ctx) => {
+                                    param_info.push_str(&format!("#   Context: {}\n", ctx));
+                                }
+                                WAILAnnotation::Default(def) => {
+                                    param_info.push_str(&format!("#   Default: {}\n", def));
+                                }
+                                WAILAnnotation::Field { .. } => unreachable!(),
+                            }
+                        }
+                    }
+                }
+
+                prompt = prompt.replace(&placeholder, &param_info);
             }
         }
 
@@ -262,8 +359,92 @@ impl<'a> WAILTemplateDef<'a> {
             let line_start = prompt[..cap.start()].rfind('\n').map_or(0, |i| i + 1);
             let indent = count_leading_whitespace(&prompt[line_start..cap.start()]);
 
-            let return_type_schema = self.output.field_type.to_schema();
-            let indented_schema = return_type_schema
+            let mut return_info = String::new();
+            return_info.push_str(&self.output.field_type.to_schema());
+
+            // Group annotations by field for return type
+            let mut field_annotations: HashMap<String, Vec<&WAILAnnotation>> = HashMap::new();
+            let mut general_annotations = Vec::new();
+
+            for annotation in &self.output.annotations {
+                match annotation {
+                    WAILAnnotation::Field { name, annotations } => {
+                        field_annotations
+                            .entry(name.clone())
+                            .or_default()
+                            .extend(annotations.iter());
+                    }
+                    _ => general_annotations.push(annotation),
+                }
+            }
+
+            // Add general annotations for return type
+            if !general_annotations.is_empty() {
+                return_info.push_str("\n# General:\n");
+                for annotation in &general_annotations {
+                    match annotation {
+                        WAILAnnotation::Description(desc) => {
+                            return_info.push_str(&format!("# {}\n", desc));
+                        }
+                        WAILAnnotation::Example(ex) => {
+                            return_info.push_str(&format!("# Example: {}\n", ex));
+                        }
+                        WAILAnnotation::Validation(rule) => {
+                            return_info.push_str(&format!("# Validation: {}\n", rule));
+                        }
+                        WAILAnnotation::Format(fmt) => {
+                            return_info.push_str(&format!("# Format: {}\n", fmt));
+                        }
+                        WAILAnnotation::Important(note) => {
+                            return_info.push_str(&format!("# Important: {}\n", note));
+                        }
+                        WAILAnnotation::Context(ctx) => {
+                            return_info.push_str(&format!("# Context: {}\n", ctx));
+                        }
+                        WAILAnnotation::Default(def) => {
+                            return_info.push_str(&format!("# Default: {}\n", def));
+                        }
+                        WAILAnnotation::Field { .. } => unreachable!(),
+                    }
+                }
+            }
+
+            // Add field-specific annotations for return type
+            if !field_annotations.is_empty() {
+                return_info.push_str("\n# Field Requirements:\n");
+                for (field_name, annotations) in field_annotations {
+                    return_info.push_str(&format!("# For {}:\n", field_name));
+                    for annotation in annotations {
+                        match annotation {
+                            WAILAnnotation::Description(desc) => {
+                                return_info.push_str(&format!("#   {}\n", desc));
+                            }
+                            WAILAnnotation::Example(ex) => {
+                                return_info.push_str(&format!("#   Example: {}\n", ex));
+                            }
+                            WAILAnnotation::Validation(rule) => {
+                                return_info.push_str(&format!("#   Validation: {}\n", rule));
+                            }
+                            WAILAnnotation::Format(fmt) => {
+                                return_info.push_str(&format!("#   Format: {}\n", fmt));
+                            }
+                            WAILAnnotation::Important(note) => {
+                                return_info.push_str(&format!("#   Important: {}\n", note));
+                            }
+                            WAILAnnotation::Context(ctx) => {
+                                return_info.push_str(&format!("#   Context: {}\n", ctx));
+                            }
+                            WAILAnnotation::Default(def) => {
+                                return_info.push_str(&format!("#   Default: {}\n", def));
+                            }
+                            WAILAnnotation::Field { .. } => unreachable!(),
+                        }
+                    }
+                }
+            }
+
+            // Apply indentation to all lines including annotations
+            let indented_schema = return_info
                 .lines()
                 .enumerate()
                 .map(|(i, line)| {
@@ -280,7 +461,6 @@ impl<'a> WAILTemplateDef<'a> {
                 "\nReturn a JSON-like format wrapped in ```gasp fences:\n\n{}",
                 indented_schema
             );
-
             prompt = re.replace(&prompt, &return_prompt).to_string();
         }
 

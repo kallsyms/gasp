@@ -258,6 +258,8 @@ impl<'a> WAILParser<'a> {
             );
         }
 
+        let (input, annotations) = many0(|i| self.parse_annotation(i))(input)?;
+
         let object = WAILObject {
             value: field_map,
             type_data: WAILTypeData {
@@ -271,7 +273,7 @@ impl<'a> WAILParser<'a> {
         let field = WAILField {
             name: name.to_string(),
             field_type: WAILType::Composite(WAILCompositeType::Object(object)),
-            annotations: Vec::new(),
+            annotations: annotations,
         };
 
         let definition = WAILDefinition::Object(field.clone());
@@ -291,12 +293,14 @@ impl<'a> WAILParser<'a> {
             |i| self.parse_type(i, None),
         ))(input)?;
 
+        let (input, annotations) = many0(|i| self.parse_annotation(i))(input)?;
+
         Ok((
             input,
             WAILField {
                 name: name.to_string(),
                 field_type,
-                annotations: Vec::new(), // For now, we'll add annotation parsing later
+                annotations: annotations, // For now, we'll add annotation parsing later
             },
         ))
     }
