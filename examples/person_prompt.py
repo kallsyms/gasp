@@ -25,9 +25,12 @@ def create_person_prompt():
     }
 
     main {
+        template_args {
+            description: String
+        }
         # This is a comment
         let person_prompt = GetPersonFromDescription(
-            description: "Alice is a 25-year-old software engineer who loves coding, AI, and hiking."
+            description: $description
         );
 
         # This is the prompt we'll send to the LLM
@@ -52,7 +55,7 @@ def main():
     print(errors)
 
     # Get the generated prompt - this is what you'd send to your LLM
-    (prompt, warnings, errors) = generator.get_prompt()
+    (prompt, warnings, errors) = generator.get_prompt(description="Alice is a 25-year-old software engineer who loves coding, AI, and hiking.")
     print("Generated Prompt:")
     print(prompt)
     print("Warnings:")
@@ -64,7 +67,7 @@ def main():
     # Here we'll simulate an LLM response with some typical quirks
     llm_response = """
     {
-        'name': 'Alice',
+        name: 'Alice',
         'age': 25,
         'interests': [
             "coding",

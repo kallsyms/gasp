@@ -10,11 +10,18 @@ pub enum WAILAnnotation {
 }
 
 #[derive(Debug, Clone)]
+pub struct WAILUnionDef<'a> {
+    pub name: String,
+    pub members: Vec<WAILType<'a>>,
+}
+
+#[derive(Debug, Clone)]
 pub enum TemplateArgument {
     String(String),
     Number(i64),
     Float(f64),
     TypeRef(String), // For when we reference a type like "String" or "Number"
+    TemplateArgRef(String),
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +66,7 @@ pub struct WAILTemplateDef<'a> {
 pub struct WAILMainDef<'a> {
     pub statements: Vec<MainStatement>,
     pub prompt: String,
+    pub template_args: HashMap<String, WAILType<'a>>,
     pub _phantom: PhantomData<&'a ()>,
 }
 
@@ -69,15 +77,21 @@ impl TemplateArgument {
             TemplateArgument::Number(n) => n.to_string(),
             TemplateArgument::Float(f) => f.to_string(),
             TemplateArgument::TypeRef(t) => t.clone(),
+            TemplateArgument::TemplateArgRef(t) => format!("${}", t),
         }
     }
 }
 
 impl<'a> WAILMainDef<'a> {
-    pub fn new(statements: Vec<MainStatement>, prompt: String) -> Self {
+    pub fn new(
+        statements: Vec<MainStatement>,
+        prompt: String,
+        template_args: Option<HashMap<String, WAILType<'a>>>,
+    ) -> Self {
         WAILMainDef {
             statements,
             prompt,
+            template_args: template_args.unwrap_or_default(),
             _phantom: PhantomData,
         }
     }
@@ -85,6 +99,7 @@ impl<'a> WAILMainDef<'a> {
     pub fn interpolate_prompt(
         &self,
         template_registry: &HashMap<String, WAILTemplateDef>,
+        template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
         let re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
@@ -118,6 +133,17 @@ impl<'a> WAILMainDef<'a> {
                     .interpolate_prompt(Some(&template_call.arguments))
                     .unwrap(),
             );
+        }
+
+        if let Some(arg_values) = template_arg_values {
+            for (name, value) in arg_values {
+                let value_str = if let Some(s) = value.as_string() {
+                    s.to_string()
+                } else {
+                    value.to_string()
+                };
+                result = result.replace(&format!("${}", name), &value_str);
+            }
         }
 
         Ok(result)
@@ -173,6 +199,8 @@ impl<'a> WAILMainDef<'a> {
                     };
 
                     let template_output = &template.output;
+                    println!("Validating: {:?}", template_output.field_type);
+                    println!("Value: {:?}", value);
                     template_output.field_type.validate_json(value)?;
                 }
                 MainStatement::Comment(_) => {}
@@ -248,7 +276,12 @@ impl<'a> WAILTemplateDef<'a> {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            prompt = re.replace(&prompt, &indented_schema).to_string();
+            let return_prompt = format!(
+                "\nReturn a JSON-like format wrapped in ```gasp fences:\n\n{}",
+                indented_schema
+            );
+
+            prompt = re.replace(&prompt, &return_prompt).to_string();
         }
 
         Ok(prompt)
@@ -257,156 +290,47 @@ impl<'a> WAILTemplateDef<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::json_types::Number;
+    use crate::wail_parser::WAILParser;
 
     #[test]
-    fn test_validate_llm_response() {
-        // Create Person type
-        let person_fields = vec![
-            WAILField {
-                name: "name".to_string(),
-                field_type: WAILType::Simple(WAILSimpleType::String(WAILString {
-                    value: String::new(),
-                    type_data: WAILTypeData {
-                        json_type: JsonValue::String(String::new()),
-                        type_name: "String",
-                        field_definitions: None,
-                        element_type: None,
-                    },
-                })),
-                annotations: vec![],
-            },
-            WAILField {
-                name: "age".to_string(),
-                field_type: WAILType::Simple(WAILSimpleType::Number(WAILNumber::Integer(
-                    WAILInteger {
-                        value: 0,
-                        type_data: WAILTypeData {
-                            json_type: JsonValue::Number(Number::Integer(0)),
-                            type_name: "Number",
-                            field_definitions: None,
-                            element_type: None,
-                        },
-                    },
-                ))),
-                annotations: vec![],
-            },
+    fn test_parse_llm_output() {
+        let wail_schema = r#"
+    object Person {
+        name: String
+        age: Number
+        interests: String[]
+    }
+
+    template GetPerson(description: String) -> Person {
+        prompt: """{{description}}"""
+    }
+
+    main {
+        let person = GetPerson(description: "test");
+        prompt { {{person}} }
+    }"#;
+
+        let parser = WAILParser::new();
+        parser.parse_wail_file(wail_schema).unwrap();
+
+        // Test relaxed JSON parsing features
+        let cases = vec![
+            // Unquoted keys
+            r#"{"person": {name: "Alice", age: 25, interests: ["coding"]}}"#,
+            // Single quotes
+            r#"{'person': {'name': 'Alice', 'age': 25, 'interests': ['coding']}}"#,
+            // Trailing commas
+            r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding",],}}"#,
+            // Mixed quotes and unquoted identifiers
+            r#"{"person": {name: 'Alice', "age": 25, interests: ["coding"]}}"#,
         ];
 
-        let person_type = WAILTemplateDef {
-            name: "Person".to_string(),
-            inputs: vec![],
-            prompt_template: "".to_string(),
-            annotations: vec![],
-            output: WAILField {
-                name: "name".to_string(),
-                field_type: WAILType::Simple(WAILSimpleType::String(WAILString {
-                    value: String::new(),
-                    type_data: WAILTypeData {
-                        json_type: JsonValue::String(String::new()),
-                        type_name: "String",
-                        field_definitions: None,
-                        element_type: None,
-                    },
-                })),
-                annotations: vec![],
-            },
-        };
-
-        // Create registry with the template
-        let mut registry = HashMap::new();
-        registry.insert("GetPersonFromDescription".to_string(), person_type);
-
-        // Create main block with two template calls
-        let main = WAILMainDef::new(
-            vec![
-                MainStatement::Assignment {
-                    variable: "person1".to_string(),
-                    template_call: WAILTemplateCall {
-                        template_name: "GetPersonFromDescription".to_string(),
-                        arguments: {
-                            let mut args = HashMap::new();
-                            args.insert(
-                                "description".to_string(),
-                                TemplateArgument::String("John is 30 years old".to_string()),
-                            );
-                            args
-                        },
-                    },
-                },
-                MainStatement::Assignment {
-                    variable: "person2".to_string(),
-                    template_call: WAILTemplateCall {
-                        template_name: "GetPersonFromDescription".to_string(),
-                        arguments: {
-                            let mut args = HashMap::new();
-                            args.insert(
-                                "description".to_string(),
-                                TemplateArgument::String("Jane is 25 years old".to_string()),
-                            );
-                            args
-                        },
-                    },
-                },
-            ],
-            "Here are the people: {{person1}} and {{person2}}".to_string(),
-        );
-
-        // Test valid response
-        let mut valid_response = HashMap::new();
-        valid_response.insert("person1".to_string(), {
-            let mut p1 = HashMap::new();
-            p1.insert("name".to_string(), JsonValue::String("John".to_string()));
-            p1.insert("age".to_string(), JsonValue::Number(Number::Integer(30)));
-            JsonValue::Object(p1)
-        });
-        valid_response.insert("person2".to_string(), {
-            let mut p2 = HashMap::new();
-            p2.insert("name".to_string(), JsonValue::String("Jane".to_string()));
-            p2.insert("age".to_string(), JsonValue::Number(Number::Integer(25)));
-            JsonValue::Object(p2)
-        });
-
-        assert!(main
-            .validate_llm_response(&JsonValue::Object(valid_response), &registry)
-            .is_ok());
-
-        // Test invalid response - missing person2
-        let mut invalid_response = HashMap::new();
-        invalid_response.insert("person1".to_string(), {
-            let mut p1 = HashMap::new();
-            p1.insert("name".to_string(), JsonValue::String("John".to_string()));
-            p1.insert("age".to_string(), JsonValue::Number(Number::Integer(30)));
-            JsonValue::Object(p1)
-        });
-
-        assert!(main
-            .validate_llm_response(&JsonValue::Object(invalid_response), &registry)
-            .is_err());
-
-        // Test invalid response - wrong type for age
-        let mut invalid_response = HashMap::new();
-        invalid_response.insert("person1".to_string(), {
-            let mut p1 = HashMap::new();
-            p1.insert("name".to_string(), JsonValue::String("John".to_string()));
-            p1.insert("age".to_string(), JsonValue::String("30".to_string()));
-            JsonValue::Object(p1)
-        });
-        invalid_response.insert("person2".to_string(), {
-            let mut p2 = HashMap::new();
-            p2.insert("name".to_string(), JsonValue::String("Jane".to_string()));
-            p2.insert("age".to_string(), JsonValue::Number(Number::Integer(25)));
-            JsonValue::Object(p2)
-        });
-
-        assert!(main
-            .validate_llm_response(&JsonValue::Object(invalid_response), &registry)
-            .is_err());
-
-        // Test invalid response - not an object
-        assert!(main
-            .validate_llm_response(&JsonValue::String("not an object".to_string()), &registry)
-            .is_err());
+        for case in cases {
+            assert!(
+                parser.parse_llm_output(case).is_ok(),
+                "Failed to parse: {}",
+                case
+            );
+        }
     }
 }

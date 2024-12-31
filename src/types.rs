@@ -29,6 +29,13 @@ pub enum WAILCompositeType<'a> {
     Tool(WAILTool<'a>),
     Object(WAILObject<'a>),
     Array(WAILArray<'a>),
+    Union(WAILUnion<'a>),
+}
+
+#[derive(Debug, Clone)]
+pub struct WAILUnion<'a> {
+    pub members: Vec<WAILType<'a>>,
+    pub type_data: WAILTypeData<'a>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +68,7 @@ impl<'a> WAILType<'a> {
                                 schema.push_str(&format!(
                                     "  {}: {}[]>\n",
                                     field.name,
-                                    field.field_type.element_type().unwrap()
+                                    field.field_type.element_type().unwrap().to_schema()
                                 ));
                             } else {
                                 schema.push_str(&format!(
@@ -76,11 +83,29 @@ impl<'a> WAILType<'a> {
                     schema
                 }
                 WAILCompositeType::Array(arr) => {
-                    if let Some(first) = arr.values.first() {
-                        format!("array<{}>", first.to_schema())
-                    } else {
-                        "array".to_string()
+                    format!(
+                        "array<{}>",
+                        arr.type_data.element_type.as_ref().unwrap().to_schema()
+                    )
+                }
+                WAILCompositeType::Union(union) => {
+                    let mut schema = String::from("\nAny of these JSON-like formats:\n\n");
+                    for (i, member) in union.members.iter().enumerate() {
+                        if i > 0 {
+                            schema.push_str("\n\n-- OR --\n\n");
+                        }
+                        schema.push_str(&format!("Format {}: ", i + 1));
+                        match member {
+                            WAILType::Simple(_) => {
+                                schema.push_str(&member.to_schema());
+                            }
+                            _ => {
+                                schema.push_str(&format!("{}: ", member.type_data().type_name));
+                                schema.push_str(&member.to_schema());
+                            }
+                        }
                     }
+                    schema
                 }
             },
             WAILType::Value(value) => match value {
@@ -107,8 +132,8 @@ impl<'a> WAILType<'a> {
         return self.type_data().field_definitions.clone();
     }
 
-    pub fn element_type(&self) -> Option<&'a str> {
-        return self.type_data().element_type;
+    pub fn element_type(&self) -> Option<Box<WAILType<'a>>> {
+        return self.type_data().element_type.clone();
     }
 
     pub fn type_data(&self) -> &WAILTypeData<'a> {
@@ -124,6 +149,7 @@ impl<'a> WAILType<'a> {
                 WAILCompositeType::Tool(t) => &t.type_data,
                 WAILCompositeType::Object(o) => &o.type_data,
                 WAILCompositeType::Array(a) => &a.type_data,
+                WAILCompositeType::Union(u) => &u.type_data,
             },
             WAILType::Value(_) => unreachable!(),
         }
@@ -131,41 +157,66 @@ impl<'a> WAILType<'a> {
 
     pub fn validate_json(&self, json: &JsonValue) -> Result<(), String> {
         match (self, json) {
-            // Simple types
-            (WAILType::Simple(WAILSimpleType::String(_)), JsonValue::String(_)) => Ok(()),
-            (WAILType::Simple(WAILSimpleType::Number(_)), JsonValue::Number(_)) => Ok(()),
-
-            // Object type
+            // Object validation with path context
             (WAILType::Composite(WAILCompositeType::Object(obj)), JsonValue::Object(map)) => {
-                // Get field definitions
                 let fields = obj
                     .type_data
                     .field_definitions
                     .as_ref()
                     .ok_or("Object type missing field definitions")?;
 
-                // Check all required fields are present with correct types
                 for field in fields {
                     match map.get(&field.name) {
-                        Some(value) => field.field_type.validate_json(value)?,
+                        Some(value) => field
+                            .field_type
+                            .validate_json(value)
+                            .map_err(|e| format!("Field '{}': {}", field.name, e))?,
                         None => return Err(format!("Missing required field: {}", field.name)),
                     }
                 }
                 Ok(())
             }
 
-            // Array type
+            // Array validation with index context
             (WAILType::Composite(WAILCompositeType::Array(arr)), JsonValue::Array(values)) => {
-                // If we have an element type, validate each element
-                if let Some(first) = arr.values.first() {
-                    for value in values {
-                        first.validate_json(value)?;
+                if let Some(element_type) = &arr.type_data.element_type {
+                    for (idx, value) in values.iter().enumerate() {
+                        element_type
+                            .validate_json(value)
+                            .map_err(|e| format!("Array element at index {}: {}", idx, e))?;
                     }
                 }
                 Ok(())
             }
 
-            // Type mismatch
+            (WAILType::Composite(WAILCompositeType::Union(union)), value) => {
+                let mut errors = Vec::new();
+                errors.push(format!(
+                    "Expected one of: {}",
+                    union
+                        .members
+                        .iter()
+                        .map(|m| m.type_name())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+                for member_type in &union.members {
+                    match member_type.validate_json(value) {
+                        Ok(()) => return Ok(()),
+                        Err(e) => errors.push(format!("{}: {}", member_type.type_name(), e)),
+                    }
+                }
+                Err(format!(
+                    "Value did not match any union type:\n{}",
+                    errors.join("\n")
+                ))
+            }
+
+            // Simple type validation with type context
+            (WAILType::Simple(WAILSimpleType::String(_)), JsonValue::String(_)) => Ok(()),
+            (WAILType::Simple(WAILSimpleType::Number(_)), JsonValue::Number(_)) => Ok(()),
+
+            // Type mismatch with expected type info
             _ => Err(format!(
                 "Type mismatch: expected {}, got {}",
                 self.type_name(),
@@ -194,7 +245,7 @@ pub struct WAILTypeData<'a> {
     pub json_type: JsonValue,
     pub type_name: &'a str,
     pub field_definitions: Option<Vec<WAILField<'a>>>,
-    pub element_type: Option<&'a str>, // Just "String", "Number", etc.
+    pub element_type: Option<Box<WAILType<'a>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -439,6 +490,7 @@ impl<'a> From<WAILType<'a>> for JsonValue {
                 WAILCompositeType::Array(array) => {
                     JsonValue::Array(array.values.into_iter().map(|v| v.into()).collect())
                 }
+                WAILCompositeType::Union(union) => JsonValue::Object(HashMap::new()),
             },
             WAILType::Value(value) => match value {
                 WAILValue::String(s) => JsonValue::String(s),
@@ -540,7 +592,17 @@ mod tests {
                 json_type: JsonValue::Array(vec![]),
                 type_name: ARRAY_TYPE,
                 field_definitions: None,
-                element_type: Some(STRING_TYPE),
+                element_type: Some(Box::new(WAILType::Simple(WAILSimpleType::String(
+                    WAILString {
+                        value: "hello".to_string(),
+                        type_data: WAILTypeData {
+                            json_type: JsonValue::String("hello".to_string()),
+                            type_name: STRING_TYPE,
+                            field_definitions: None,
+                            element_type: None,
+                        },
+                    },
+                )))),
             },
             values: vec![
                 WAILType::Simple(WAILSimpleType::String(WAILString {

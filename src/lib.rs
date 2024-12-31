@@ -16,8 +16,9 @@ use nom::{
     IResult,
 };
 
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString};
 use pyo3::Python;
+use std::collections::HashMap;
 
 use crate::json_types::{JsonValue, Number};
 
@@ -72,9 +73,40 @@ impl WAILGenerator {
         Ok(())
     }
 
-    #[pyo3(text_signature = "($self)")]
-    fn get_prompt(&self) -> PyResult<(Option<String>, Vec<String>, Vec<String>)> {
+    #[pyo3(text_signature = "($self, **kwargs)", signature = (**kwargs))]
+    fn get_prompt(
+        &self,
+        kwargs: Option<&PyDict>,
+    ) -> PyResult<(Option<String>, Vec<String>, Vec<String>)> {
         let parser = wail_parser::WAILParser::new();
+
+        // Convert kwargs to HashMap<String, JsonValue> if provided
+        let template_arg_values = if let Some(kwargs) = kwargs {
+            let mut arg_dict = HashMap::new();
+
+            for (key, value) in kwargs.iter() {
+                let key_str = key.extract::<String>()?;
+                // Convert Python values to JsonValue
+                let json_value = if value.is_instance_of::<PyString>() {
+                    JsonValue::String(value.extract::<String>()?)
+                } else if value.is_instance_of::<PyFloat>() {
+                    JsonValue::Number(Number::Float(value.extract::<f64>()?))
+                } else if value.is_instance_of::<PyLong>() {
+                    JsonValue::Number(Number::Integer(value.extract::<i64>()?))
+                } else {
+                    return Err(PyValueError::new_err(format!(
+                        "Unsupported type for template argument: {}",
+                        key_str
+                    )));
+                };
+                arg_dict.insert(key_str, json_value);
+            }
+            Some(arg_dict)
+        } else {
+            None
+        };
+
+        println!("template_arg_values: {:?}", template_arg_values);
 
         // First parse and validate the WAIL schema
         match parser.parse_wail_file(&self.wail_content) {
@@ -126,7 +158,11 @@ impl WAILGenerator {
                     .collect();
 
                 if errors.is_empty() {
-                    Ok((Some(parser.prepare_prompt()), warning_strs, error_strs))
+                    Ok((
+                        Some(parser.prepare_prompt(template_arg_values.as_ref())),
+                        warning_strs,
+                        error_strs,
+                    ))
                 } else {
                     Ok((None, warning_strs, error_strs))
                 }
@@ -235,4 +271,243 @@ impl WAILGenerator {
 fn gasp(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<WAILGenerator>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wail_validation() {
+        let schema = r#"
+    object Person {
+        name: String 
+        age: Number
+        interests: String[]
+    }
+    template GetPerson() -> Person {
+        prompt: """Test""" 
+    }
+    main {
+        let person = GetPerson();
+        prompt { {{person}} }
+    }"#;
+
+        let parser = wail_parser::WAILParser::new();
+        parser.parse_wail_file(schema).unwrap();
+
+        let valid = r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding"]}}"#;
+        assert!(parser.validate_json(valid).is_ok());
+
+        let invalid_types = r#"{"person": {"name": 42, "age": "25", "interests": "coding"}}"#;
+        assert!(parser.validate_json(invalid_types).is_err());
+
+        let missing_field = r#"{"person": {"name": "Alice", "interests": ["coding"]}}"#;
+        assert!(parser.validate_json(missing_field).is_err());
+    }
+
+    #[test]
+    fn test_union_validation() {
+        let schema = r#"
+   object Success {
+       message: String
+   }
+
+   object Error {
+       code: Number
+       message: String
+   }
+
+   union Response = Success | Error;
+   
+   object Container {
+       items: Response[]
+   }
+
+   template Test() -> Container {
+       prompt: """Test"""
+   }
+
+   main {
+       let container = Test();
+       prompt { {{container}} }
+   }"#;
+
+        let parser = wail_parser::WAILParser::new();
+        parser.parse_wail_file(schema).unwrap();
+
+        // Valid array of union objects
+        let valid = r#"{"container": {
+       "items": [
+           {"message": "ok"},
+           {"code": 404, "message": "Not found"}
+       ]
+   }}"#;
+        assert!(parser.validate_json(valid).is_ok());
+
+        // Invalid - object missing required field
+        let invalid_obj = r#"{"container": {
+       "items": [{"code": 500}]
+   }}"#;
+
+        println!("{:?}", parser.validate_json(invalid_obj));
+        assert!(parser.validate_json(invalid_obj).is_err());
+
+        // Invalid - wrong type for field
+        let invalid_type = r#"{"container": {
+       "items": [{"code": "500", "message": 404}]
+   }}"#;
+        assert!(parser.validate_json(invalid_type).is_err());
+    }
+
+    #[test]
+    fn test_union_template_returns() {
+        // Test 1: Inline union return
+        {
+            let schema = r#"
+           object Success { message: String }
+           object Error { code: Number }
+           
+           template Test() -> Success | Error {
+               prompt: """Test"""
+           }
+           
+           main {
+               let result = Test();
+               prompt { {{result}} }
+           }"#;
+
+            let parser = wail_parser::WAILParser::new();
+            parser.parse_wail_file(schema).unwrap();
+
+            let valid_success = r#"{"result": {"message": "ok"}}"#;
+            assert!(parser.parse_llm_output(valid_success).is_ok());
+            assert!(parser.validate_json(valid_success).is_ok());
+
+            let valid_error = r#"{"result": {"code": 404}}"#;
+            assert!(parser.parse_llm_output(valid_error).is_ok());
+            assert!(parser.validate_json(valid_error).is_ok());
+
+            let invalid = r#"{"result": {"code": "404"}}"#;
+            assert!(parser.parse_llm_output(invalid).is_ok());
+            assert!(parser.validate_json(invalid).is_err());
+        }
+
+        // Test 2: Named union return
+        {
+            let schema = r#"
+           object Success { message: String }
+           object Error { code: Number }
+           union Response = Success | Error;
+           
+           template Test() -> Response {
+               prompt: """Test"""
+           }
+           
+           main {
+               let result = Test();
+               prompt { {{result}} }
+           }"#;
+
+            let parser = wail_parser::WAILParser::new();
+            parser.parse_wail_file(schema).unwrap();
+
+            let valid_success = r#"{"result": {"message": "ok"}}"#;
+            assert!(parser.parse_llm_output(valid_success).is_ok());
+            assert!(parser.validate_json(valid_success).is_ok());
+
+            let valid_error = r#"{"result": {"code": 404}}"#;
+            assert!(parser.parse_llm_output(valid_error).is_ok());
+            assert!(parser.validate_json(valid_error).is_ok());
+
+            let invalid = r#"{"result": {"code": "404"}}"#;
+            assert!(parser.parse_llm_output(invalid).is_ok());
+            assert!(parser.validate_json(invalid).is_err());
+        }
+
+        // Test 3: Array of named union return
+        {
+            let schema = r#"
+           object Success { message: String }
+           object Error { code: Number }
+           union Response = Success | Error;
+           
+           template Test() -> Response[] {
+               prompt: """Test"""
+           }
+           
+           main {
+               let result = Test();
+               prompt { {{result}} }
+           }"#;
+
+            let parser = wail_parser::WAILParser::new();
+            parser.parse_wail_file(schema).unwrap();
+
+            let valid = r#"{"result": [
+               {"message": "ok"},
+               {"code": 404}
+           ]}"#;
+            assert!(parser.parse_llm_output(valid).is_ok());
+            assert!(parser.validate_json(valid).is_ok());
+
+            let invalid = r#"{"result": [
+               {"message": "ok"},
+               {"code": "404"}
+           ]}"#;
+            assert!(parser.parse_llm_output(invalid).is_ok());
+            assert!(parser.validate_json(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn test_validation_error_messages() {
+        let schema = r#"
+    object Success { message: String }
+    object Error { 
+        code: Number
+        details: String
+    }
+    union Response = Success | Error;
+    
+    template Test() -> Response[] {
+        prompt: """Test"""
+    }
+    
+    main {
+        let result = Test();
+        prompt { {{result}} }
+    }"#;
+
+        let parser = wail_parser::WAILParser::new();
+        parser.parse_wail_file(schema).unwrap();
+
+        // Test wrong type in array
+        let wrong_type = r#"{"result": [
+        {"message": 123},
+        {"code": "404", "details": "error"}
+    ]}"#;
+        let err = parser.validate_json(wrong_type).unwrap_err();
+        assert!(err.contains("Array element at index 0"));
+        assert!(err.contains("Field 'message'"));
+        assert!(err.contains("expected String"));
+
+        // Test invalid union type
+        let invalid_union = r#"{"result": [
+        {"something": "wrong"}
+    ]}"#;
+        let err = parser.validate_json(invalid_union).unwrap_err();
+        println!("{:?}", err);
+        assert!(err.contains("Array element at index 0"));
+        assert!(err.contains("Expected one of: Success | Error"));
+
+        // Test wrong type in nested field
+        let wrong_nested = r#"{"result": [
+        {"code": false, "details": "error"}
+    ]}"#;
+        let err = parser.validate_json(wrong_nested).unwrap_err();
+        assert!(err.contains("Array element at index 0"));
+        assert!(err.contains("Field 'code'"));
+        assert!(err.contains("expected Number"));
+    }
 }
