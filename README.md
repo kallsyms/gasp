@@ -30,7 +30,7 @@ Anyway both Asimov and now GASP/WAIL are built for supporting [Bismuth](https://
 - **Robust Error Recovery**: Handles common LLM response issues like trailing commas, unquoted identifiers, and malformed JSON
 - **Type Validation**: Strong type checking for both schema definitions and JSON responses
 - **High Performance**: Written in Rust with Python bindings for optimal speed
-- **Developer Friendly**: Clear error messages and intuitive schema syntax
+- **Developer Friendly**: Clear error messages (except for syntax errors see below) and intuitive schema syntax
 - **LLM-Optimized**: Specifically designed to work with the quirks and inconsistencies of LLM outputs
 
 ## Anti-Features
