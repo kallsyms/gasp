@@ -93,6 +93,34 @@ impl TemplateArgument {
     }
 }
 
+// Helper function to get nested JSON values using dot notation
+fn get_nested_value<'a>(json: &'a HashMap<String, JsonValue>, path: &str) -> Option<&'a JsonValue> {
+    let parts: Vec<&str> = path.split('.')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    
+    if parts.is_empty() {
+        return None;
+    }
+    
+    let mut current = json.get(parts[0]);
+    
+    // Traverse the remaining path components
+    for part in parts.iter().skip(1) {
+        current = match current {
+            Some(JsonValue::Object(obj)) => obj.get(*part),
+            Some(JsonValue::Array(arr)) if part.parse::<usize>().is_ok() => {
+                // Support array indexing if the part is a valid index
+                arr.get(part.parse::<usize>().unwrap())
+            },
+            _ => return None,
+        };
+    }
+    
+    current
+}
+
 impl<'a> WAILMainDef<'a> {
     pub fn new(
         statements: Vec<MainStatement>,
@@ -113,9 +141,65 @@ impl<'a> WAILMainDef<'a> {
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
-        let re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        
+        // Handle {{#each}} loops first
+        let loop_re = regex::Regex::new(r"\{\{#each\s+([^}]+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        let mut replacements = Vec::new();
+        
+        // Collect all loop replacements first
+        for cap in loop_re.captures_iter(&result) {
+            let full_match = cap[0].to_string();
+            let path = cap[1].trim();
+            let template = cap[2].to_string();
+            
+            // Find the array to iterate over
+            let mut loop_result = String::new();
+            if let Some(arg_values) = template_arg_values {
+                if let Some(array) = get_nested_value(arg_values, path) {
+                    if let JsonValue::Array(items) = array {
+                        for item in items {
+                            let mut item_result = template.clone();
+                            // Replace variables within the loop template
+                            let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+                            for var_cap in var_re.captures_iter(&template) {
+                                let var_match = var_cap[0].to_string();
+                                let var_name = var_cap[1].trim();
+                                // Handle nested property access within loop variables
+                                let var_parts: Vec<&str> = var_name.split('.').collect();
+                                let mut current_value = Some(item);
+                                
+                                // Traverse the property path
+                                for part in var_parts {
+                                    current_value = match current_value {
+                                        Some(JsonValue::Object(obj)) => obj.get(part),
+                                        _ => None,
+                                    };
+                                }
+                                
+                                if let Some(value) = current_value {
+                                    let value_str = value.to_string();
+                                    item_result = item_result.replace(&var_match, &value_str);
+                                }
+                            }
+                            loop_result.push_str(&item_result);
+                        }
+                    }
+                }
+            }
+            replacements.push((full_match, loop_result));
+        }
+        
+        // Apply all replacements
+        for (pattern, replacement) in replacements {
+            result = result.replace(&pattern, &replacement);
+        }
 
-        for cap in re.captures_iter(&self.prompt) {
+        // Handle regular variable interpolation
+        let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        let mut var_replacements = Vec::new();
+        
+        // Collect all variable replacements first
+        for cap in var_re.captures_iter(&result) {
             let full_match = cap[0].to_string();
             let var_name = &cap[1];
 
@@ -137,13 +221,17 @@ impl<'a> WAILMainDef<'a> {
                 .get(&template_call.template_name)
                 .ok_or_else(|| format!("Template not found: {}", template_call.template_name))?;
 
-            // Replace the placeholder with the template's prompt
-            result = result.replace(
-                &full_match,
-                &template
-                    .interpolate_prompt(Some(&template_call.arguments))
-                    .unwrap(),
-            );
+            // Get the interpolated template prompt
+            let replacement = template
+                .interpolate_prompt(Some(&template_call.arguments))
+                .unwrap();
+                
+            var_replacements.push((full_match, replacement));
+        }
+        
+        // Apply all variable replacements
+        for (pattern, replacement) in var_replacements {
+            result = result.replace(&pattern, &replacement);
         }
 
         if let Some(arg_values) = template_arg_values {

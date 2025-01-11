@@ -66,7 +66,7 @@ impl<'a> WAILType<'a> {
                         for field in fields {
                             if field.field_type.element_type().is_some() {
                                 schema.push_str(&format!(
-                                    "  {}: {}[]>\n",
+                                    "  {}: {}[]\n",
                                     field.name,
                                     field.field_type.element_type().unwrap().to_schema()
                                 ));

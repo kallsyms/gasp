@@ -17,6 +17,7 @@ use nom_supreme::final_parser::Location;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Add;
 
 use nom_supreme::error::{BaseErrorKind, ErrorTree, Expectation, StackContext};
 use nom_supreme::parser_ext::ParserExt;
@@ -115,6 +116,9 @@ fn adjust_indentation(content: &str, target_indent: usize) -> String {
 pub struct WAILParser<'a> {
     registry: RefCell<HashMap<String, WAILField<'a>>>,
     template_registry: RefCell<HashMap<String, WAILTemplateDef<'a>>>,
+    adhoc_obj_ref_id_counter: RefCell<i64>,
+    adhoc_obj_ids: RefCell<Vec<String>>,
+    adhoc_obj_refs: RefCell<HashMap<String, WAILObject<'a>>>,
     main: RefCell<Option<WAILMainDef<'a>>>,
 }
 
@@ -123,6 +127,9 @@ impl<'a> WAILParser<'a> {
         Self {
             registry: RefCell::new(HashMap::new()),
             template_registry: RefCell::new(HashMap::new()),
+            adhoc_obj_ref_id_counter: RefCell::new(0),
+            adhoc_obj_refs: RefCell::new(HashMap::new()),
+            adhoc_obj_ids: RefCell::new(Vec::new()),
             main: RefCell::new(None),
         }
     }
@@ -430,11 +437,12 @@ impl<'a> WAILParser<'a> {
     }
 
     fn parse_field(&'a self, input: &'a str) -> IResult<&str, WAILField, ErrorTree<&'a str>> {
-        let (input, (name, _, _, (field_type, _))) = tuple((
+        let (input, (name, _, _, (field_type, _), _)) = tuple((
             |i| self.identifier(i),
             char(':'),
             multispace0,
             |i| self.parse_type(i, None),
+            opt(|i| self.parse_comment(i)),
         ))(input)?;
 
         let (input, annotations) = many0(|i| self.parse_annotation(i))(input)?;
@@ -449,11 +457,76 @@ impl<'a> WAILParser<'a> {
         ))
     }
 
+    fn parse_adhoc_object_type(
+        &'a self,
+        input: &'a str,
+    ) -> IResult<&str, (WAILType<'a>, String), ErrorTree<&'a str>> {
+        let adhoc_id = self.adhoc_obj_ref_id_counter.borrow().clone() + 1;
+        let (input, _) = multispace0(input)?;
+        let (input, fields) = delimited(
+            char('{'),
+            many1(delimited(multispace0, |i| self.parse_field(i), multispace0)),
+            char('}'),
+        )(input)?;
+
+        // Create object type as before...
+        let mut field_map = HashMap::new();
+        for field in &fields {
+            field_map.insert(
+                WAILString {
+                    value: field.name.clone(),
+                    type_data: WAILTypeData {
+                        json_type: JsonValue::String(field.name.clone()),
+                        type_name: "String",
+                        field_definitions: None,
+                        element_type: None,
+                    },
+                },
+                field.field_type.clone(),
+            );
+        }
+
+        self.adhoc_obj_ids.borrow_mut().push(adhoc_id.to_string());
+
+        let object = WAILObject {
+            value: field_map,
+            type_data: WAILTypeData {
+                json_type: JsonValue::Object(HashMap::new()),
+                type_name: Box::leak(adhoc_id.to_string().into_boxed_str()),
+                field_definitions: Some(fields),
+                element_type: None,
+            },
+        };
+
+        self.adhoc_obj_refs
+            .borrow_mut()
+            .insert(adhoc_id.to_string(), object.clone());
+
+        let field = WAILField {
+            name: adhoc_id.to_string(),
+            field_type: WAILType::Composite(WAILCompositeType::Object(object)),
+            annotations: vec![],
+        };
+
+        self.registry
+            .borrow_mut()
+            .insert(adhoc_id.to_string(), field.clone());
+
+        *self.adhoc_obj_ref_id_counter.borrow_mut() += 1;
+
+        Ok((input, (field.field_type, adhoc_id.to_string().clone())))
+    }
+
     fn parse_type(
         &'a self,
         input: &'a str,
         complex_type_name: Option<&'a str>,
     ) -> IResult<&str, (WAILType<'a>, String), ErrorTree<&'a str>> {
+        if input.starts_with('{') {
+            let (input, (obj_type, id)) = self.parse_adhoc_object_type(input)?;
+            return Ok((input, (obj_type, id)));
+        }
+
         // Parse first type identifier
         let (input, base_type) = self.identifier(input)?;
         let (input, _) = multispace0(input)?;
