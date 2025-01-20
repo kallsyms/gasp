@@ -144,7 +144,7 @@ impl<'a> WAILMainDef<'a> {
         let mut result = self.prompt.clone();
 
         // Handle {{#each}} loops first
-        let loop_re = regex::Regex::new(r"\{\{#each\s+([^}]+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        let loop_re = regex::Regex::new(r"\{\{#each\s+([a-zA-Z0-9_.]+)\}\}(.*?)\{\{/each\}\}").unwrap();
         let mut replacements = Vec::new();
 
         // Collect all loop replacements first
@@ -161,13 +161,16 @@ impl<'a> WAILMainDef<'a> {
                         for item in items {
                             let mut item_result = template.clone();
                             // Replace variables within the loop template
-                            let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
                             for var_cap in var_re.captures_iter(&template) {
                                 let var_match = var_cap[0].to_string();
                                 let var_name = var_cap[1].trim();
                                 
-                                let current_value = if var_name == "." || var_name == "this" {
+                                let current_value = if var_name.trim() == "." || var_name.trim() == "this" {
                                     // Handle direct item reference
+                                    Some(item)
+                                } else if var_name.trim().is_empty() {
+                                    // Also treat empty variable name as current item reference
                                     Some(item)
                                 } else {
                                     // Handle nested property access
@@ -212,7 +215,12 @@ impl<'a> WAILMainDef<'a> {
         // Collect all variable replacements first
         for cap in var_re.captures_iter(&result) {
             let full_match = cap[0].to_string();
-            let var_name = &cap[1];
+            let var_name = cap[1].trim();
+            
+            // Skip #each directives as they are handled separately
+            if var_name.starts_with("#each") {
+                continue;
+            }
 
             // Try to find a template call first
             let template_replacement = self.statements.iter().find_map(|stmt| match stmt {
