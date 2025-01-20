@@ -165,13 +165,13 @@ impl<'a> WAILMainDef<'a> {
                             for var_cap in var_re.captures_iter(&template) {
                                 let var_match = var_cap[0].to_string();
                                             let var_name = var_cap[1].trim();
+                                            let mut current_value = if var_name == "." {
                                                 // Special case for current item reference
-                                                if var_name == "." {
-                                                    current_value = Some(item);
-                                                } else {
-                                                    // Handle nested property access within loop variables
-                                                    let var_parts: Vec<&str> = var_name.split('.').collect();
-                                                    let mut current_value = Some(item);
+                                                Some(item)
+                                            } else {
+                                                // Handle nested property access within loop variables
+                                                let var_parts: Vec<&str> = var_name.split('.').collect();
+                                                Some(item)
 
                                 // Traverse the property path
                                 for part in var_parts {
