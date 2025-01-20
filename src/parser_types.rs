@@ -172,6 +172,7 @@ impl<'a> WAILMainDef<'a> {
                                                 // Handle nested property access within loop variables
                                                 let var_parts: Vec<&str> = var_name.split('.').collect();
                                                 Some(item)
+                                            }
 
                                 // Traverse the property path
                                 for part in var_parts {
