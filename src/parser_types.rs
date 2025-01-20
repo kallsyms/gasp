@@ -171,17 +171,19 @@ impl<'a> WAILMainDef<'a> {
                                             } else {
                                                 // Handle nested property access within loop variables
                                                 let var_parts: Vec<&str> = var_name.split('.').collect();
-                                                Some(item)
+                                                if var_parts.is_empty() {
+                                                    None
+                                                } else {
+                                                    let mut value = Some(item);
+                                                    for part in var_parts {
+                                                        value = match value {
+                                                            Some(JsonValue::Object(obj)) => obj.get(part),
+                                                            _ => None,
+                                                        };
+                                                    }
+                                                    value
+                                                }
                                             };
-
-                                // Traverse the property path
-                                let var_parts: Vec<&str> = var_name.split('.').collect();
-                                for part in var_parts {
-                                    current_value = match current_value {
-                                        Some(JsonValue::Object(obj)) => obj.get(part),
-                                        _ => None,
-                                    };
-                                }
 
                                 if let Some(value) = current_value {
                                     let value_str = match value {
