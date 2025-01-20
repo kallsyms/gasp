@@ -214,28 +214,30 @@ impl<'a> WAILMainDef<'a> {
             let full_match = cap[0].to_string();
             let var_name = &cap[1];
 
-            // Find the template call for this variable
-            let template_call = self
-                .statements
-                .iter()
-                .find_map(|stmt| match stmt {
-                    MainStatement::Assignment {
-                        variable,
-                        template_call,
-                    } if variable == var_name => Some(template_call),
-                    _ => None,
-                })
-                .ok_or_else(|| format!("No template call found for variable: {}", var_name))?;
+            // Try to find a template call first
+            let template_replacement = self.statements.iter().find_map(|stmt| match stmt {
+                MainStatement::Assignment {
+                    variable,
+                    template_call,
+                } if variable == var_name => {
+                    let template = template_registry.get(&template_call.template_name)?;
+                    template.interpolate_prompt(Some(&template_call.arguments)).ok()
+                }
+                _ => None,
+            });
 
-            // Look up the template
-            let template = template_registry
-                .get(&template_call.template_name)
-                .ok_or_else(|| format!("Template not found: {}", template_call.template_name))?;
-
-            // Get the interpolated template prompt
-            let replacement = template
-                .interpolate_prompt(Some(&template_call.arguments))
-                .unwrap();
+            let replacement = if let Some(template_result) = template_replacement {
+                template_result
+            } else if let Some(arg_values) = template_arg_values {
+                // If no template call found, try to get value directly from arg_values
+                if let Some(value) = get_nested_value(arg_values, var_name) {
+                    value.to_string()
+                } else {
+                    return Err(format!("Variable not found: {}", var_name));
+                }
+            } else {
+                return Err(format!("No value found for variable: {}", var_name));
+            };
 
             var_replacements.push((full_match, replacement));
         }
