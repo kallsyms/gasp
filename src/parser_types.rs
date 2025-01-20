@@ -144,7 +144,8 @@ impl<'a> WAILMainDef<'a> {
         let mut result = self.prompt.clone();
 
         // Handle {{#each}} loops first
-        let loop_re = regex::Regex::new(r"\{\{#each\s+([a-zA-Z0-9_.]+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        let loop_re =
+            regex::Regex::new(r"\{\{#each\s+([a-zA-Z0-9_.]+)\}\}(.*?)\{\{/each\}\}").unwrap();
         let mut replacements = Vec::new();
 
         // Collect all loop replacements first
@@ -161,28 +162,29 @@ impl<'a> WAILMainDef<'a> {
                         for item in items {
                             let mut item_result = template.clone();
                             // Replace variables within the loop template
-        let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+                            let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
                             for var_cap in var_re.captures_iter(&template) {
                                 let var_match = var_cap[0].to_string();
                                 let var_name = var_cap[1].trim();
-                                
-                                let current_value = if var_name.trim() == "." || var_name.trim() == "this" {
-                                    // Handle direct item reference
-                                    Some(item)
-                                } else if var_name.trim().is_empty() {
-                                    // Also treat empty variable name as current item reference
-                                    Some(item)
-                                } else {
-                                    // Handle nested property access
-                                    let mut value = Some(item);
-                                    for part in var_name.split('.') {
-                                        value = match value {
-                                            Some(JsonValue::Object(obj)) => obj.get(part),
-                                            _ => None,
-                                        };
-                                    }
-                                    value
-                                };
+
+                                let current_value =
+                                    if var_name.trim() == "." || var_name.trim() == "this" {
+                                        // Handle direct item reference
+                                        Some(item)
+                                    } else if var_name.trim().is_empty() {
+                                        // Also treat empty variable name as current item reference
+                                        Some(item)
+                                    } else {
+                                        // Handle nested property access
+                                        let mut value = Some(item);
+                                        for part in var_name.split('.') {
+                                            value = match value {
+                                                Some(JsonValue::Object(obj)) => obj.get(part),
+                                                _ => None,
+                                            };
+                                        }
+                                        value
+                                    };
 
                                 if let Some(value) = current_value {
                                     let value_str = match value {
@@ -216,7 +218,7 @@ impl<'a> WAILMainDef<'a> {
         for cap in var_re.captures_iter(&result) {
             let full_match = cap[0].to_string();
             let var_name = cap[1].trim();
-            
+
             // Skip #each directives as they are handled separately
             if var_name.starts_with("#each") {
                 continue;
@@ -229,7 +231,9 @@ impl<'a> WAILMainDef<'a> {
                     template_call,
                 } if variable == var_name => {
                     let template = template_registry.get(&template_call.template_name)?;
-                    template.interpolate_prompt(Some(&template_call.arguments)).ok()
+                    template
+                        .interpolate_prompt(Some(&template_call.arguments))
+                        .ok()
                 }
                 _ => None,
             });
@@ -714,7 +718,7 @@ mod tests {
     fn test_each_loop_basic() {
         let mut main_def = WAILMainDef::new(
             vec![],
-            "{{#each user.hobbies}}Hobby: {{this}}{{/each}}".to_string(),
+            "{{#each user.hobbies}}Hobby: {{.}}{{/each}}".to_string(),
             None,
         );
 
