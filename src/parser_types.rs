@@ -750,19 +750,13 @@ mod tests {
     fn test_complex_template() {
         let mut json = create_test_json();
 
-        let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\n\
-            Hobbies:\n\
-            {{#each user.hobbies}}* {{.}}\n{{/each}}"
-            .to_string();
+        let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\nHobbies:\n{{#each user.hobbies}}* {{.}}\n{{/each}}".to_string();
 
         let mut main_def = WAILMainDef::new(vec![], template, None);
         let template_registry = HashMap::new();
 
         let result = main_def.interpolate_prompt(&template_registry, Some(&json));
-        let expected = "User John (30) lives in Springfield.\n\
-            Hobbies:\n\
-            * reading\n\
-            * gaming\n";
+        let expected = "User John (30) lives in Springfield.\nHobbies:\n* reading\n* gaming\n";
 
         assert_eq!(result.unwrap(), expected);
     }
