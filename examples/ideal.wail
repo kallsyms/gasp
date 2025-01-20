@@ -24,7 +24,7 @@ template GeneratePrompt(conversation: Conversation) -> RealtimeEvent {
     You are a helpful AI assistant engaging in a conversation with the user.
     Previous messages:
     {{#each conversation.messages}}
-    {{role}}: {{content}}
+    {{this.role}}: {{this.content}}
     {{/each}}
 
     Respond naturally and conversationally. Your response will be delivered through both text and speech.

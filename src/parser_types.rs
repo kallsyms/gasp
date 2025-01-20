@@ -164,31 +164,31 @@ impl<'a> WAILMainDef<'a> {
                             let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
                             for var_cap in var_re.captures_iter(&template) {
                                 let var_match = var_cap[0].to_string();
-                                            let var_name = var_cap[1].trim();
-                                            let mut current_value = if var_name == "." {
-                                                // Special case for current item reference
-                                                Some(item)
-                                            } else {
-                                                // Handle nested property access within loop variables
-                                                let var_parts: Vec<&str> = var_name.split('.').collect();
-                                                if var_parts.is_empty() {
-                                                    None
-                                                } else {
-                                                    let mut value = Some(item);
-                                                    for part in var_parts {
-                                                        value = match value {
-                                                            Some(JsonValue::Object(obj)) => obj.get(part),
-                                                            _ => None,
-                                                        };
-                                                    }
-                                                    value
-                                                }
-                                            };
+                                let var_name = var_cap[1].trim();
+                                
+                                let current_value = if var_name == "." || var_name == "this" {
+                                    // Handle direct item reference
+                                    Some(item)
+                                } else {
+                                    // Handle nested property access
+                                    let mut value = Some(item);
+                                    for part in var_name.split('.') {
+                                        value = match value {
+                                            Some(JsonValue::Object(obj)) => obj.get(part),
+                                            _ => None,
+                                        };
+                                    }
+                                    value
+                                };
 
                                 if let Some(value) = current_value {
                                     let value_str = match value {
                                         JsonValue::String(s) => s.clone(),
-                                        _ => value.to_string()
+                                        JsonValue::Number(n) => n.to_string(),
+                                        JsonValue::Array(_) => value.to_string(),
+                                        JsonValue::Object(_) => value.to_string(),
+                                        JsonValue::Bool(b) => b.to_string(),
+                                        JsonValue::Null => "null".to_string(),
                                     };
                                     item_result = item_result.replace(&var_match, &value_str);
                                 }
