@@ -178,7 +178,10 @@ impl<'a> WAILMainDef<'a> {
                                 }
 
                                 if let Some(value) = current_value {
-                                    let value_str = value.to_string();
+                                    let value_str = match value {
+                                        JsonValue::String(s) => s.clone(),
+                                        _ => value.to_string()
+                                    };
                                     item_result = item_result.replace(&var_match, &value_str);
                                 }
                             }
@@ -724,7 +727,7 @@ mod tests {
 
         let mut main_def = WAILMainDef::new(
             vec![],
-            "{{#each pets}}Pet: \"{{name}}\" is a \"{{type}}\"{{/each}}".to_string(),
+            "{{#each pets}}Pet: {{name}} is a {{type}}{{/each}}".to_string(),
             None,
         );
 
