@@ -187,7 +187,7 @@ impl<'a> WAILMainDef<'a> {
                                         JsonValue::Number(n) => n.to_string(),
                                         JsonValue::Array(_) => value.to_string(),
                                         JsonValue::Object(_) => value.to_string(),
-                                        JsonValue::Bool(b) => b.to_string(),
+                                        JsonValue::Boolean(b) => b.to_string(),
                                         JsonValue::Null => "null".to_string(),
                                     };
                                     item_result = item_result.replace(&var_match, &value_str);
