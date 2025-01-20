@@ -149,7 +149,8 @@ impl<'a> WAILMainDef<'a> {
         let nodes = parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
         
         let mut output = String::new();
-        for node in nodes {
+        let (_, segments) = nodes;
+        for node in segments {
             match node {
                 TemplateNode::Text(text) => output.push_str(&text),
                 TemplateNode::Variable(var_name) => {

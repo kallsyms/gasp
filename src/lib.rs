@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 mod json_types;
 mod parser_types;
 mod rd_json_stack_parser;
+mod template_parser;
 mod types;
 mod wail_parser;
 use nom::{
