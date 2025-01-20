@@ -232,15 +232,15 @@ mod tests {
         
         // Test basic property access
         let name = get_nested_value(&json, "user.name");
-        assert_eq!(name, Some(&JsonValue::String("John".to_string())));
+        assert_eq!(name.as_ref(), Some(&JsonValue::String("John".to_string())));
         
         // Test nested object access
         let city = get_nested_value(&json, "user.address.city");
-        assert_eq!(city, Some(&JsonValue::String("Springfield".to_string())));
+        assert_eq!(city.as_ref(), Some(&JsonValue::String("Springfield".to_string())));
         
         // Test array access
         let hobby = get_nested_value(&json, "user.hobbies.0");
-        assert_eq!(hobby, Some(&JsonValue::String("reading".to_string())));
+        assert_eq!(hobby.as_ref(), Some(&JsonValue::String("reading".to_string())));
     }
 
     #[test]
