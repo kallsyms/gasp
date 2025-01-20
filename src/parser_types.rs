@@ -1,4 +1,4 @@
-use crate::json_types::JsonValue;
+use crate::json_types::{JsonValue, Number};
 use crate::types::*;
 use regex;
 use std::collections::HashMap;
@@ -95,17 +95,18 @@ impl TemplateArgument {
 
 // Helper function to get nested JSON values using dot notation
 fn get_nested_value<'a>(json: &'a HashMap<String, JsonValue>, path: &str) -> Option<&'a JsonValue> {
-    let parts: Vec<&str> = path.split('.')
+    let parts: Vec<&str> = path
+        .split('.')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
-    
+
     if parts.is_empty() {
         return None;
     }
-    
+
     let mut current = json.get(parts[0]);
-    
+
     // Traverse the remaining path components
     for part in parts.iter().skip(1) {
         current = match current {
@@ -113,11 +114,11 @@ fn get_nested_value<'a>(json: &'a HashMap<String, JsonValue>, path: &str) -> Opt
             Some(JsonValue::Array(arr)) if part.parse::<usize>().is_ok() => {
                 // Support array indexing if the part is a valid index
                 arr.get(part.parse::<usize>().unwrap())
-            },
+            }
             _ => return None,
         };
     }
-    
+
     current
 }
 
@@ -141,17 +142,17 @@ impl<'a> WAILMainDef<'a> {
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
-        
+
         // Handle {{#each}} loops first
         let loop_re = regex::Regex::new(r"\{\{#each\s+([^}]+)\}\}(.*?)\{\{/each\}\}").unwrap();
         let mut replacements = Vec::new();
-        
+
         // Collect all loop replacements first
         for cap in loop_re.captures_iter(&result) {
             let full_match = cap[0].to_string();
             let path = cap[1].trim();
             let template = cap[2].to_string();
-            
+
             // Find the array to iterate over
             let mut loop_result = String::new();
             if let Some(arg_values) = template_arg_values {
@@ -167,7 +168,7 @@ impl<'a> WAILMainDef<'a> {
                                 // Handle nested property access within loop variables
                                 let var_parts: Vec<&str> = var_name.split('.').collect();
                                 let mut current_value = Some(item);
-                                
+
                                 // Traverse the property path
                                 for part in var_parts {
                                     current_value = match current_value {
@@ -175,7 +176,7 @@ impl<'a> WAILMainDef<'a> {
                                         _ => None,
                                     };
                                 }
-                                
+
                                 if let Some(value) = current_value {
                                     let value_str = value.to_string();
                                     item_result = item_result.replace(&var_match, &value_str);
@@ -188,7 +189,7 @@ impl<'a> WAILMainDef<'a> {
             }
             replacements.push((full_match, loop_result));
         }
-        
+
         // Apply all replacements
         for (pattern, replacement) in replacements {
             result = result.replace(&pattern, &replacement);
@@ -197,134 +198,6 @@ impl<'a> WAILMainDef<'a> {
         // Handle regular variable interpolation
         let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
         let mut var_replacements = Vec::new();
-        
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use crate::json_types::JsonValue;
-
-    // Helper function to create a test JSON object
-    fn create_test_json() -> HashMap<String, JsonValue> {
-        let mut json = HashMap::new();
-        let mut user = HashMap::new();
-        user.insert("name".to_string(), JsonValue::String("John".to_string()));
-        user.insert("age".to_string(), JsonValue::Number(30));
-        
-        let mut address = HashMap::new();
-        address.insert("street".to_string(), JsonValue::String("123 Main St".to_string()));
-        address.insert("city".to_string(), JsonValue::String("Springfield".to_string()));
-        user.insert("address".to_string(), JsonValue::Object(address));
-        
-        let hobbies = vec![
-            JsonValue::String("reading".to_string()),
-            JsonValue::String("gaming".to_string())
-        ];
-        user.insert("hobbies".to_string(), JsonValue::Array(hobbies));
-        
-        json.insert("user".to_string(), JsonValue::Object(user));
-        json
-    }
-
-    #[test]
-    fn test_get_nested_value_basic() {
-        let json = create_test_json();
-        
-        // Test basic property access
-        let name = get_nested_value(&json, "user.name");
-        assert_eq!(name.and_then(|v| v.as_string()), Some("John"));
-        
-        // Test nested object access
-        let city = get_nested_value(&json, "user.address.city");
-        assert_eq!(city.and_then(|v| v.as_string()), Some("Springfield"));
-        
-        // Test array access
-        let hobby = get_nested_value(&json, "user.hobbies.0");
-        assert_eq!(hobby.and_then(|v| v.as_string()), Some("reading"));
-    }
-
-    #[test]
-    fn test_get_nested_value_error_cases() {
-        let json = create_test_json();
-        
-        // Test invalid path
-        assert_eq!(get_nested_value(&json, "invalid.path").and_then(|v| v.as_string()), None);
-        
-        // Test empty path
-        assert_eq!(get_nested_value(&json, "").and_then(|v| v.as_string()), None);
-        
-        // Test invalid array index
-        assert_eq!(get_nested_value(&json, "user.hobbies.99").and_then(|v| v.as_string()), None);
-        
-        // Test path to primitive as if it were an object
-        assert_eq!(get_nested_value(&json, "user.name.invalid").and_then(|v| v.as_string()), None);
-    }
-
-    #[test]
-    fn test_each_loop_basic() {
-        let mut main_def = WAILMainDef::new(
-            vec![],
-            "{{#each user.hobbies}}Hobby: {{.}}{{/each}}".to_string(),
-            None,
-        );
-        
-        let template_registry = HashMap::new();
-        let arg_values = create_test_json();
-        
-        let result = main_def.interpolate_prompt(&template_registry, Some(&arg_values));
-        assert_eq!(result.unwrap(), "Hobby: readingHobby: gaming");
-    }
-
-    #[test]
-    fn test_each_loop_nested_properties() {
-        // Create test data with nested objects in array
-        let mut json = HashMap::new();
-        let mut pets = Vec::new();
-        
-        let mut pet1 = HashMap::new();
-        pet1.insert("name".to_string(), JsonValue::String("Fluffy".to_string()));
-        pet1.insert("type".to_string(), JsonValue::String("cat".to_string()));
-        pets.push(JsonValue::Object(pet1));
-        
-        let mut pet2 = HashMap::new();
-        pet2.insert("name".to_string(), JsonValue::String("Rover".to_string()));
-        pet2.insert("type".to_string(), JsonValue::String("dog".to_string()));
-        pets.push(JsonValue::Object(pet2));
-        
-        json.insert("pets".to_string(), JsonValue::Array(pets));
-        
-        let mut main_def = WAILMainDef::new(
-            vec![],
-            "{{#each pets}}Pet: {{name}} is a {{type}}{{/each}}".to_string(),
-            None,
-        );
-        
-        let template_registry = HashMap::new();
-        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
-        assert_eq!(result.unwrap(), "Pet: Fluffy is a catPet: Rover is a dog");
-    }
-
-    #[test]
-    fn test_complex_template() {
-        let mut json = create_test_json();
-        
-        let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\n\
-                    Hobbies:\n\
-                    {{#each user.hobbies}}* {{.}}\n{{/each}}".to_string();
-        
-        let mut main_def = WAILMainDef::new(vec![], template, None);
-        let template_registry = HashMap::new();
-        
-        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
-        let expected = "User John (30) lives in Springfield.\n\
-                    Hobbies:\n\
-                    * reading\n\
-                    * gaming\n";
-        
-        assert_eq!(result.unwrap(), expected);
-    }
-}
-        
         // Collect all variable replacements first
         for cap in var_re.captures_iter(&result) {
             let full_match = cap[0].to_string();
@@ -352,10 +225,10 @@ mod tests {
             let replacement = template
                 .interpolate_prompt(Some(&template_call.arguments))
                 .unwrap();
-                
+
             var_replacements.push((full_match, replacement));
         }
-        
+
         // Apply all variable replacements
         for (pattern, replacement) in var_replacements {
             result = result.replace(&pattern, &replacement);
@@ -727,5 +600,157 @@ mod tests {
                 case
             );
         }
+    }
+
+    use super::*;
+    use crate::json_types::JsonValue;
+    use std::collections::HashMap;
+
+    // Helper function to create a test JSON object
+    fn create_test_json() -> HashMap<String, JsonValue> {
+        let mut json = HashMap::new();
+        let mut user = HashMap::new();
+        user.insert("name".to_string(), JsonValue::String("John".to_string()));
+        user.insert("age".to_string(), JsonValue::Number(Number::Integer(30)));
+
+        let mut address = HashMap::new();
+        address.insert(
+            "street".to_string(),
+            JsonValue::String("123 Main St".to_string()),
+        );
+        address.insert(
+            "city".to_string(),
+            JsonValue::String("Springfield".to_string()),
+        );
+        user.insert("address".to_string(), JsonValue::Object(address));
+
+        let hobbies = vec![
+            JsonValue::String("reading".to_string()),
+            JsonValue::String("gaming".to_string()),
+        ];
+        user.insert("hobbies".to_string(), JsonValue::Array(hobbies));
+
+        json.insert("user".to_string(), JsonValue::Object(user));
+        json
+    }
+
+    #[test]
+    fn test_get_nested_value_basic() {
+        let json = create_test_json();
+
+        // Test basic property access
+        let name = get_nested_value(&json, "user.name");
+        assert_eq!(
+            name.and_then(|v| v.as_string()),
+            Some("John".to_string()).as_ref()
+        );
+
+        // Test nested object access
+        let city = get_nested_value(&json, "user.address.city");
+        assert_eq!(
+            city.and_then(|v| v.as_string()),
+            Some("Springfield".to_string()).as_ref()
+        );
+
+        // Test array access
+        let hobby = get_nested_value(&json, "user.hobbies.0");
+        assert_eq!(
+            hobby.and_then(|v| v.as_string()),
+            Some("reading".to_string()).as_ref()
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_error_cases() {
+        let json = create_test_json();
+
+        // Test invalid path
+        assert_eq!(
+            get_nested_value(&json, "invalid.path").and_then(|v| v.as_string()),
+            None
+        );
+
+        // Test empty path
+        assert_eq!(
+            get_nested_value(&json, "").and_then(|v| v.as_string()),
+            None
+        );
+
+        // Test invalid array index
+        assert_eq!(
+            get_nested_value(&json, "user.hobbies.99").and_then(|v| v.as_string()),
+            None
+        );
+
+        // Test path to primitive as if it were an object
+        assert_eq!(
+            get_nested_value(&json, "user.name.invalid").and_then(|v| v.as_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_each_loop_basic() {
+        let mut main_def = WAILMainDef::new(
+            vec![],
+            "{{#each user.hobbies}}Hobby: \"{{.}}\"{{/each}}".to_string(),
+            None,
+        );
+
+        let template_registry = HashMap::new();
+        let arg_values = create_test_json();
+
+        let result = main_def.interpolate_prompt(&template_registry, Some(&arg_values));
+        assert_eq!(result.unwrap(), "Hobby: readingHobby: gaming");
+    }
+
+    #[test]
+    fn test_each_loop_nested_properties() {
+        // Create test data with nested objects in array
+        let mut json = HashMap::new();
+        let mut pets = Vec::new();
+
+        let mut pet1 = HashMap::new();
+        pet1.insert("name".to_string(), JsonValue::String("Fluffy".to_string()));
+        pet1.insert("type".to_string(), JsonValue::String("cat".to_string()));
+        pets.push(JsonValue::Object(pet1));
+
+        let mut pet2 = HashMap::new();
+        pet2.insert("name".to_string(), JsonValue::String("Rover".to_string()));
+        pet2.insert("type".to_string(), JsonValue::String("dog".to_string()));
+        pets.push(JsonValue::Object(pet2));
+
+        json.insert("pets".to_string(), JsonValue::Array(pets));
+
+        let mut main_def = WAILMainDef::new(
+            vec![],
+            "{{#each pets}}Pet: \"{{name}}\" is a \"{{type}}\"{{/each}}".to_string(),
+            None,
+        );
+
+        let template_registry = HashMap::new();
+        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
+        assert_eq!(result.unwrap(), "Pet: Fluffy is a catPet: Rover is a dog");
+    }
+
+    #[test]
+    fn test_complex_template() {
+        let mut json = create_test_json();
+
+        let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\n\
+            Hobbies:\n\
+            {{#each user.hobbies}}* {{.}}\n{{/each}}"
+            .to_string();
+
+        let mut main_def = WAILMainDef::new(vec![], template, None);
+        let template_registry = HashMap::new();
+
+        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
+        let expected = "User John (30) lives in Springfield.\n\
+            Hobbies:\n\
+            * reading\n\
+            * gaming\n";
+
+        assert_eq!(result.unwrap(), expected);
     }
 }
