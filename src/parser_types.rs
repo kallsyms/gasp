@@ -232,15 +232,15 @@ mod tests {
         
         // Test basic property access
         let name = get_nested_value(&json, "user.name");
-        assert_eq!(name.as_ref(), Some(&JsonValue::String("John".to_string())));
+        assert_eq!(name.and_then(|v| v.as_string()), Some("John"));
         
         // Test nested object access
         let city = get_nested_value(&json, "user.address.city");
-        assert_eq!(city.as_ref(), Some(&JsonValue::String("Springfield".to_string())));
+        assert_eq!(city.and_then(|v| v.as_string()), Some("Springfield"));
         
         // Test array access
         let hobby = get_nested_value(&json, "user.hobbies.0");
-        assert_eq!(hobby.as_ref(), Some(&JsonValue::String("reading".to_string())));
+        assert_eq!(hobby.and_then(|v| v.as_string()), Some("reading"));
     }
 
     #[test]
@@ -248,16 +248,16 @@ mod tests {
         let json = create_test_json();
         
         // Test invalid path
-        assert_eq!(get_nested_value(&json, "invalid.path"), None);
+        assert_eq!(get_nested_value(&json, "invalid.path").and_then(|v| v.as_string()), None);
         
         // Test empty path
-        assert_eq!(get_nested_value(&json, ""), None);
+        assert_eq!(get_nested_value(&json, "").and_then(|v| v.as_string()), None);
         
         // Test invalid array index
-        assert_eq!(get_nested_value(&json, "user.hobbies.99"), None);
+        assert_eq!(get_nested_value(&json, "user.hobbies.99").and_then(|v| v.as_string()), None);
         
         // Test path to primitive as if it were an object
-        assert_eq!(get_nested_value(&json, "user.name.invalid"), None);
+        assert_eq!(get_nested_value(&json, "user.name.invalid").and_then(|v| v.as_string()), None);
     }
 
     #[test]
