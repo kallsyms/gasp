@@ -172,9 +172,10 @@ impl<'a> WAILMainDef<'a> {
                                                 // Handle nested property access within loop variables
                                                 let var_parts: Vec<&str> = var_name.split('.').collect();
                                                 Some(item)
-                                            }
+                                            };
 
                                 // Traverse the property path
+                                let var_parts: Vec<&str> = var_name.split('.').collect();
                                 for part in var_parts {
                                     current_value = match current_value {
                                         Some(JsonValue::Object(obj)) => obj.get(part),
