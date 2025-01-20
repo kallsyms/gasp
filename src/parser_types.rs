@@ -143,121 +143,80 @@ impl<'a> WAILMainDef<'a> {
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
 
-        // Handle {{#each}} loops first
-        let loop_re =
-            regex::Regex::new(r"\{\{#each\s+([a-zA-Z0-9_.]+)\}\}(.*?)\{\{/each\}\}").unwrap();
-        let mut replacements = Vec::new();
+        use crate::template_parser::{parse_template, TemplateNode};
+        
+        // Parse the template into nodes
+        let nodes = parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
+        
+        let mut output = String::new();
+        for node in nodes {
+            match node {
+                TemplateNode::Text(text) => output.push_str(&text),
+                TemplateNode::Variable(var_name) => {
+                    // Try to find a template call first
+                    let replacement = self.statements.iter().find_map(|stmt| match stmt {
+                        MainStatement::Assignment {
+                            variable,
+                            template_call,
+                        } if variable == var_name => {
+                            let template = template_registry.get(&template_call.template_name)?;
+                            template
+                                .interpolate_prompt(Some(&template_call.arguments))
+                                .ok()
+                        }
+                        _ => None,
+                    });
 
-        // Collect all loop replacements first
-        for cap in loop_re.captures_iter(&result) {
-            let full_match = cap[0].to_string();
-            let path = cap[1].trim();
-            let template = cap[2].to_string();
-
-            // Find the array to iterate over
-            let mut loop_result = String::new();
-            if let Some(arg_values) = template_arg_values {
-                if let Some(array) = get_nested_value(arg_values, path) {
-                    if let JsonValue::Array(items) = array {
-                        for item in items {
-                            let mut item_result = template.clone();
-                            // Replace variables within the loop template
-                            let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
-                            for var_cap in var_re.captures_iter(&template) {
-                                let var_match = var_cap[0].to_string();
-                                let var_name = var_cap[1].trim();
-
-                                let current_value =
-                                    if var_name.trim() == "." || var_name.trim() == "this" {
-                                        // Handle direct item reference
-                                        Some(item)
-                                    } else if var_name.trim().is_empty() {
-                                        // Also treat empty variable name as current item reference
-                                        Some(item)
-                                    } else {
-                                        // Handle nested property access
-                                        let mut value = Some(item);
-                                        for part in var_name.split('.') {
-                                            value = match value {
-                                                Some(JsonValue::Object(obj)) => obj.get(part),
-                                                _ => None,
+                    let value = if let Some(template_result) = replacement {
+                        template_result
+                    } else if let Some(arg_values) = template_arg_values {
+                        if let Some(value) = get_nested_value(arg_values, &var_name) {
+                            value.to_string()
+                        } else {
+                            return Err(format!("Variable not found: {}", var_name));
+                        }
+                    } else {
+                        return Err(format!("No value found for variable: {}", var_name));
+                    };
+                    output.push_str(&value);
+                }
+                TemplateNode::Each { path, body } => {
+                    if let Some(arg_values) = template_arg_values {
+                        if let Some(JsonValue::Array(items)) = get_nested_value(arg_values, &path) {
+                            for item in items {
+                                let mut item_context = HashMap::new();
+                                item_context.insert(".".to_string(), item.clone());
+                                
+                                // Parse and process the loop body as a nested template
+                                let body_nodes = parse_template(&body)
+                                    .map_err(|e| format!("Loop body parsing error: {}", e))?;
+                                
+                                for body_node in body_nodes {
+                                    match body_node {
+                                        TemplateNode::Text(text) => output.push_str(&text),
+                                        TemplateNode::Variable(var_name) => {
+                                            let value = if var_name == "." {
+                                                item.to_string()
+                                            } else if let Some(value) = get_nested_value(&item_context, &var_name) {
+                                                value.to_string()
+                                            } else {
+                                                return Err(format!("Loop variable not found: {}", var_name));
                                             };
+                                            output.push_str(&value);
                                         }
-                                        value
-                                    };
-
-                                if let Some(value) = current_value {
-                                    let value_str = match value {
-                                        JsonValue::String(s) => s.clone(),
-                                        JsonValue::Number(n) => n.to_string(),
-                                        JsonValue::Array(_) => value.to_string(),
-                                        JsonValue::Object(_) => value.to_string(),
-                                        JsonValue::Boolean(b) => b.to_string(),
-                                        JsonValue::Null => "null".to_string(),
-                                    };
-                                    item_result = item_result.replace(&var_match, &value_str);
+                                        TemplateNode::Each { .. } => {
+                                            return Err("Nested loops are not supported".to_string());
+                                        }
+                                    }
                                 }
                             }
-                            loop_result.push_str(&item_result);
                         }
                     }
                 }
             }
-            replacements.push((full_match, loop_result));
         }
-
-        // Apply all replacements
-        for (pattern, replacement) in replacements {
-            result = result.replace(&pattern, &replacement);
-        }
-
-        // Handle regular variable interpolation
-        let var_re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
-        let mut var_replacements = Vec::new();
-        // Collect all variable replacements first
-        for cap in var_re.captures_iter(&result) {
-            let full_match = cap[0].to_string();
-            let var_name = cap[1].trim();
-
-            // Skip #each directives as they are handled separately
-            if var_name.starts_with("#each") {
-                continue;
-            }
-
-            // Try to find a template call first
-            let template_replacement = self.statements.iter().find_map(|stmt| match stmt {
-                MainStatement::Assignment {
-                    variable,
-                    template_call,
-                } if variable == var_name => {
-                    let template = template_registry.get(&template_call.template_name)?;
-                    template
-                        .interpolate_prompt(Some(&template_call.arguments))
-                        .ok()
-                }
-                _ => None,
-            });
-
-            let replacement = if let Some(template_result) = template_replacement {
-                template_result
-            } else if let Some(arg_values) = template_arg_values {
-                // If no template call found, try to get value directly from arg_values
-                if let Some(value) = get_nested_value(arg_values, var_name) {
-                    value.to_string()
-                } else {
-                    return Err(format!("Variable not found: {}", var_name));
-                }
-            } else {
-                return Err(format!("No value found for variable: {}", var_name));
-            };
-
-            var_replacements.push((full_match, replacement));
-        }
-
-        // Apply all variable replacements
-        for (pattern, replacement) in var_replacements {
-            result = result.replace(&pattern, &replacement);
-        }
+        
+        result = output;
 
         if let Some(arg_values) = template_arg_values {
             for (name, value) in arg_values {
