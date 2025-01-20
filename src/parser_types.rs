@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_each_loop_basic() {
-        let mut main_def = WAILMainDef::new(
+        let main_def = WAILMainDef::new(
             vec![],
             "{{#each user.hobbies}}Hobby: {{.}}{{/each}}".to_string(),
             None,
@@ -747,7 +747,7 @@ mod tests {
 
         json.insert("pets".to_string(), JsonValue::Array(pets));
 
-        let mut main_def = WAILMainDef::new(
+        let main_def = WAILMainDef::new(
             vec![],
             "{{#each pets}}Pet: {{name}} is a {{type}}{{/each}}".to_string(),
             None,
@@ -760,11 +760,11 @@ mod tests {
 
     #[test]
     fn test_complex_template() {
-        let mut json = create_test_json();
+        let json = create_test_json();
 
         let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\nHobbies:\n{{#each user.hobbies}}* {{.}}\n{{/each}}".to_string();
 
-        let mut main_def = WAILMainDef::new(vec![], template, None);
+        let main_def = WAILMainDef::new(vec![], template, None);
         let template_registry = HashMap::new();
 
         let result = main_def.interpolate_prompt(&template_registry, Some(&json));
