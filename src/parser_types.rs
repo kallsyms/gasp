@@ -696,7 +696,7 @@ mod tests {
     fn test_each_loop_basic() {
         let mut main_def = WAILMainDef::new(
             vec![],
-            "{{#each user.hobbies}}Hobby: \"{{.}}\"{{/each}}".to_string(),
+            "{{#each user.hobbies}}Hobby: {{this}}{{/each}}".to_string(),
             None,
         );
 
