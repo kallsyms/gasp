@@ -1,10 +1,10 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
-    character::complete::{char, multispace0},
-    combinator::{map, opt},
+    character::complete::multispace0,
+    combinator::map,
     multi::many0,
-    sequence::{delimited, preceded, terminated, tuple},
+    sequence::{delimited, preceded, terminated},
     IResult,
 };
 
@@ -16,6 +16,19 @@ pub enum TemplateSegment {
         path: String,
         body: Vec<TemplateSegment>,
     },
+}
+
+impl ToString for TemplateSegment {
+    fn to_string(&self) -> String {
+        match self {
+            TemplateSegment::Text(text) => text.clone(),
+            TemplateSegment::Variable(var) => format!("{{{{{}}}}}", var),
+            TemplateSegment::EachLoop { path, body } => {
+                let body_str = body.iter().map(|s| s.to_string()).collect::<String>();
+                format!("{{{{#each {}}}}}{}{{{{/each}}}}", path, body_str)
+            }
+        }
+    }
 }
 
 fn parse_variable(input: &str) -> IResult<&str, TemplateSegment> {

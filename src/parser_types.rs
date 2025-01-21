@@ -143,7 +143,7 @@ impl<'a> WAILMainDef<'a> {
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
 
-        use crate::template_parser::{parse_template, TemplateNode};
+        use crate::template_parser::{parse_template, TemplateSegment};
         
         // Parse the template into nodes
         let nodes = parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
@@ -152,14 +152,14 @@ impl<'a> WAILMainDef<'a> {
         let (_, segments) = nodes;
         for node in segments {
             match node {
-                TemplateNode::Text(text) => output.push_str(&text),
-                TemplateNode::Variable(var_name) => {
+                TemplateSegment::Text(text) => output.push_str(&text),
+                TemplateSegment::Variable(var_name) => {
                     // Try to find a template call first
                     let replacement = self.statements.iter().find_map(|stmt| match stmt {
                         MainStatement::Assignment {
                             variable,
                             template_call,
-                        } if variable == var_name => {
+                        } if variable == &var_name => {
                             let template = template_registry.get(&template_call.template_name)?;
                             template
                                 .interpolate_prompt(Some(&template_call.arguments))
@@ -181,7 +181,7 @@ impl<'a> WAILMainDef<'a> {
                     };
                     output.push_str(&value);
                 }
-                TemplateNode::Each { path, body } => {
+                TemplateSegment::EachLoop { path, body } => {
                     if let Some(arg_values) = template_arg_values {
                         if let Some(JsonValue::Array(items)) = get_nested_value(arg_values, &path) {
                             for item in items {
@@ -189,14 +189,15 @@ impl<'a> WAILMainDef<'a> {
                                 item_context.insert(".".to_string(), item.clone());
                                 
                                 // Parse and process the loop body as a nested template
-                                let body_nodes = parse_template(&body)
+                                let body_str = body.iter().map(|s| s.to_string()).collect::<String>();
+                                let body_nodes = parse_template(&body_str)
                                     .map_err(|e| format!("Loop body parsing error: {}", e))?;
                                 
                                 let (_, segments) = body_nodes;
                                 for body_node in segments {
                                     match body_node {
-                                        TemplateNode::Text(text) => output.push_str(&text),
-                                        TemplateNode::Variable(var_name) => {
+                                        TemplateSegment::Text(text) => output.push_str(&text),
+                                        TemplateSegment::Variable(var_name) => {
                                             let value = if var_name == "." {
                                                 item.to_string()
                                             } else if let Some(value) = get_nested_value(&item_context, &var_name) {
@@ -206,7 +207,7 @@ impl<'a> WAILMainDef<'a> {
                                             };
                                             output.push_str(&value);
                                         }
-                                        TemplateNode::Each { .. } => {
+                                        TemplateSegment::EachLoop { .. } => {
                                             return Err("Nested loops are not supported".to_string());
                                         }
                                     }
