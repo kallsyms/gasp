@@ -192,7 +192,8 @@ impl<'a> WAILMainDef<'a> {
                                 let body_nodes = parse_template(&body)
                                     .map_err(|e| format!("Loop body parsing error: {}", e))?;
                                 
-                                for body_node in body_nodes {
+                                let (_, segments) = body_nodes;
+                                for body_node in segments {
                                     match body_node {
                                         TemplateNode::Text(text) => output.push_str(&text),
                                         TemplateNode::Variable(var_name) => {
