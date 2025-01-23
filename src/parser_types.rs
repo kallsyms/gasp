@@ -211,7 +211,7 @@ impl<'a> WAILMainDef<'a> {
                 TemplateSegment::EachLoop { path, body } => {
                     if let Some(arg_values) = template_arg_values {
                         if let Some(JsonValue::Array(items)) = get_nested_value(arg_values, &path) {
-                            for item in items {
+                            for (i, item) in items.iter().enumerate() {
                                                 let mut item_context = HashMap::new();
                                                 item_context.insert(".".to_string(), item.clone());
                                                 
@@ -232,10 +232,6 @@ impl<'a> WAILMainDef<'a> {
                                     match body_node {
                                         TemplateSegment::Text(text) => {
                                             output.push_str(&text);
-                                            // Preserve any newlines that were in the original template
-                                            if text.ends_with('\n') && !output.ends_with('\n') {
-                                                output.push('\n');
-                                            }
                                         },
                                         TemplateSegment::Variable(var_name) => {
                                             let value = if var_name == "." {
@@ -306,9 +302,9 @@ impl<'a> WAILMainDef<'a> {
                                         }
                                     }
                                 }
-                                // Add newline after each item except the last one
-                                if !output.ends_with('\n') {
-                                    output.push('\n');
+                                // Add newline between items
+                                if i < items.len() - 1 {
+                                    output.push_str("\n");
                                 }
                             }
                         }
