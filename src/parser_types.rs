@@ -196,7 +196,13 @@ impl<'a> WAILMainDef<'a> {
                                 let (_, segments) = body_nodes;
                                 for body_node in segments {
                                     match body_node {
-                                        TemplateSegment::Text(text) => output.push_str(&text),
+                                        TemplateSegment::Text(text) => {
+                                            output.push_str(&text);
+                                            // Preserve any newlines that were in the original template
+                                            if text.ends_with('\n') && !output.ends_with('\n') {
+                                                output.push('\n');
+                                            }
+                                        },
                                         TemplateSegment::Variable(var_name) => {
                                             let value = if var_name == "." {
                                                 match item {
