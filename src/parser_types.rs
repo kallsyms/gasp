@@ -199,9 +199,15 @@ impl<'a> WAILMainDef<'a> {
                                         TemplateSegment::Text(text) => output.push_str(&text),
                                         TemplateSegment::Variable(var_name) => {
                                             let value = if var_name == "." {
-                                                item.to_string()
+                                                match item {
+                                                    JsonValue::String(s) => s.clone(),
+                                                    _ => item.to_string()
+                                                }
                                             } else if let Some(value) = get_nested_value(&item_context, &var_name) {
-                                                value.to_string()
+                                                match value {
+                                                    JsonValue::String(s) => s.clone(),
+                                                    _ => value.to_string()
+                                                }
                                             } else {
                                                 return Err(format!("Loop variable not found: {}", var_name));
                                             };
