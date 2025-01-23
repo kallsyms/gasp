@@ -369,17 +369,23 @@ impl<'a> WAILMainDef<'a> {
                     JsonValue::Object(obj) => {
                         let mut parts = Vec::new();
                         for (k, v) in obj {
-                            match v {
-                                JsonValue::String(s) => parts.push(format!("{}: {}", k, s)),
-                                JsonValue::Number(n) => parts.push(format!("{}: {}", k, n)),
-                                _ => parts.push(format!(
-                                    "{}: {}",
-                                    k,
-                                    v.to_string().trim_matches('"')
-                                )),
-                            }
+                            let value_str = match v {
+                                JsonValue::String(s) => format!("\"{}\"", s),
+                                JsonValue::Number(n) => n.to_string(),
+                                JsonValue::Boolean(b) => b.to_string(),
+                                JsonValue::Null => "null".to_string(),
+                                JsonValue::Array(arr) => format!("[{}]", arr.iter()
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")),
+                                JsonValue::Object(inner_obj) => format!("{{{}}}", inner_obj.iter()
+                                    .map(|(k, v)| format!("\"{}\": {}", k, v))
+                                    .collect::<Vec<_>>()
+                                    .join(", "))
+                            };
+                            parts.push(format!("\"{}\": {}", k, value_str));
                         }
-                        parts.join(", ")
+                        format!("{{{}}}", parts.join(", "))
                     }
                     JsonValue::Array(arr) => {
                         let mut parts = Vec::new();
