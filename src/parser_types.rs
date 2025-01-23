@@ -201,11 +201,13 @@ impl<'a> WAILMainDef<'a> {
                                             let value = if var_name == "." {
                                                 match item {
                                                     JsonValue::String(s) => s.clone(),
+                                                    JsonValue::Number(n) => n.to_string(),
                                                     _ => item.to_string()
                                                 }
                                             } else if let Some(value) = get_nested_value(&item_context, &var_name) {
                                                 match value {
                                                     JsonValue::String(s) => s.clone(),
+                                                    JsonValue::Number(n) => n.to_string(),
                                                     _ => value.to_string()
                                                 }
                                             } else {
