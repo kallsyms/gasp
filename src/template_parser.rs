@@ -60,7 +60,12 @@ fn parse_each_loop(input: &str) -> IResult<&str, TemplateSegment> {
     let (input, _) = tag("{{/each}}")(input)?;
     
     let path = path.trim().to_string();
-    let (_, body_segments) = parse_template(body)?;
+    let (_, mut body_segments) = parse_template(body)?;
+    
+    // Ensure loop body ends with newline if it doesn't already
+    if !body.ends_with('\n') {
+        body_segments.push(TemplateSegment::Text("\n".to_string()));
+    }
     
     Ok((input, TemplateSegment::EachLoop {
         path,
@@ -102,7 +107,10 @@ mod tests {
             result,
             TemplateSegment::EachLoop {
                 path: "items".to_string(),
-                body: vec![TemplateSegment::Variable(".".to_string())],
+                body: vec![
+                    TemplateSegment::Variable(".".to_string()),
+                    TemplateSegment::Text("\n".to_string()),
+                ],
             }
         );
     }

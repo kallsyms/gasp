@@ -172,7 +172,34 @@ impl<'a> WAILMainDef<'a> {
                         template_result
                     } else if let Some(arg_values) = template_arg_values {
                         if let Some(value) = get_nested_value(arg_values, &var_name) {
-                            value.to_string()
+                            match value {
+                                JsonValue::String(s) => s.clone(),
+                                JsonValue::Number(n) => n.to_string(),
+                                JsonValue::Object(obj) => {
+                                    let mut parts = Vec::new();
+                                    for (k, v) in obj {
+                                        match v {
+                                            JsonValue::String(s) => parts.push(format!("{}: {}", k, s)),
+                                            JsonValue::Number(n) => parts.push(format!("{}: {}", k, n)),
+                                            _ => parts.push(format!("{}: {}", k, v.to_string().trim_matches('"')))
+                                        }
+                                    }
+                                    parts.join(", ")
+                                },
+                                JsonValue::Array(arr) => {
+                                    let mut parts = Vec::new();
+                                    for v in arr {
+                                        match v {
+                                            JsonValue::String(s) => parts.push(s.clone()),
+                                            JsonValue::Number(n) => parts.push(n.to_string()),
+                                            _ => parts.push(v.to_string().trim_matches('"').to_string())
+                                        }
+                                    }
+                                    parts.join(", ")
+                                },
+                                JsonValue::Boolean(b) => b.to_string(),
+                                JsonValue::Null => "null".to_string()
+                            }
                         } else {
                             return Err(format!("Variable not found: {}", var_name));
                         }
@@ -185,10 +212,17 @@ impl<'a> WAILMainDef<'a> {
                     if let Some(arg_values) = template_arg_values {
                         if let Some(JsonValue::Array(items)) = get_nested_value(arg_values, &path) {
                             for item in items {
-                                let mut item_context = HashMap::new();
-                                item_context.insert(".".to_string(), item.clone());
-                                
-                                // Parse and process the loop body as a nested template
+                                                let mut item_context = HashMap::new();
+                                                item_context.insert(".".to_string(), item.clone());
+                                                
+                                                // If item is an object, add its fields to the context
+                                                if let JsonValue::Object(obj) = item {
+                                                    for (key, value) in obj {
+                                                        item_context.insert(key.clone(), value.clone());
+                                                    }
+                                                }
+                                                
+                                                // Parse and process the loop body as a nested template
                                 let body_str = body.iter().map(|s| s.to_string()).collect::<String>();
                                 let body_nodes = parse_template(&body_str)
                                     .map_err(|e| format!("Loop body parsing error: {}", e))?;
@@ -208,13 +242,59 @@ impl<'a> WAILMainDef<'a> {
                                                 match item {
                                                     JsonValue::String(s) => s.clone(),
                                                     JsonValue::Number(n) => n.to_string(),
-                                                    _ => item.to_string()
+                                                    JsonValue::Object(obj) => {
+                                                        let mut parts = Vec::new();
+                                                        for (k, v) in obj {
+                                                            match v {
+                                                                JsonValue::String(s) => parts.push(format!("{}: {}", k, s)),
+                                                                JsonValue::Number(n) => parts.push(format!("{}: {}", k, n)),
+                                                                _ => parts.push(format!("{}: {}", k, v.to_string().trim_matches('"')))
+                                                            }
+                                                        }
+                                                        parts.join(", ")
+                                                    },
+                                                    JsonValue::Array(arr) => {
+                                                        let mut parts = Vec::new();
+                                                        for v in arr {
+                                                            match v {
+                                                                JsonValue::String(s) => parts.push(s.clone()),
+                                                                JsonValue::Number(n) => parts.push(n.to_string()),
+                                                                _ => parts.push(v.to_string().trim_matches('"').to_string())
+                                                            }
+                                                        }
+                                                        parts.join(", ")
+                                                    },
+                                                    JsonValue::Boolean(b) => b.to_string(),
+                                                    JsonValue::Null => "null".to_string()
                                                 }
                                             } else if let Some(value) = get_nested_value(&item_context, &var_name) {
                                                 match value {
                                                     JsonValue::String(s) => s.clone(),
                                                     JsonValue::Number(n) => n.to_string(),
-                                                    _ => value.to_string()
+                                                    JsonValue::Object(obj) => {
+                                                        let mut parts = Vec::new();
+                                                        for (k, v) in obj {
+                                                            match v {
+                                                                JsonValue::String(s) => parts.push(format!("{}: {}", k, s)),
+                                                                JsonValue::Number(n) => parts.push(format!("{}: {}", k, n)),
+                                                                _ => parts.push(format!("{}: {}", k, v.to_string().trim_matches('"')))
+                                                            }
+                                                        }
+                                                        parts.join(", ")
+                                                    },
+                                                    JsonValue::Array(arr) => {
+                                                        let mut parts = Vec::new();
+                                                        for v in arr {
+                                                            match v {
+                                                                JsonValue::String(s) => parts.push(s.clone()),
+                                                                JsonValue::Number(n) => parts.push(n.to_string()),
+                                                                _ => parts.push(v.to_string().trim_matches('"').to_string())
+                                                            }
+                                                        }
+                                                        parts.join(", ")
+                                                    },
+                                                    JsonValue::Boolean(b) => b.to_string(),
+                                                    JsonValue::Null => "null".to_string()
                                                 }
                                             } else {
                                                 return Err(format!("Loop variable not found: {}", var_name));
@@ -225,6 +305,10 @@ impl<'a> WAILMainDef<'a> {
                                             return Err("Nested loops are not supported".to_string());
                                         }
                                     }
+                                }
+                                // Add newline after each item except the last one
+                                if !output.ends_with('\n') {
+                                    output.push('\n');
                                 }
                             }
                         }
@@ -237,10 +321,33 @@ impl<'a> WAILMainDef<'a> {
 
         if let Some(arg_values) = template_arg_values {
             for (name, value) in arg_values {
-                let value_str = if let Some(s) = value.as_string() {
-                    s.to_string()
-                } else {
-                    value.to_string()
+                let value_str = match value {
+                    JsonValue::String(s) => s.clone(),
+                    JsonValue::Number(n) => n.to_string(),
+                    JsonValue::Object(obj) => {
+                        let mut parts = Vec::new();
+                        for (k, v) in obj {
+                            match v {
+                                JsonValue::String(s) => parts.push(format!("{}: {}", k, s)),
+                                JsonValue::Number(n) => parts.push(format!("{}: {}", k, n)),
+                                _ => parts.push(format!("{}: {}", k, v.to_string().trim_matches('"')))
+                            }
+                        }
+                        parts.join(", ")
+                    },
+                    JsonValue::Array(arr) => {
+                        let mut parts = Vec::new();
+                        for v in arr {
+                            match v {
+                                JsonValue::String(s) => parts.push(s.clone()),
+                                JsonValue::Number(n) => parts.push(n.to_string()),
+                                _ => parts.push(v.to_string().trim_matches('"').to_string())
+                            }
+                        }
+                        parts.join(", ")
+                    },
+                    JsonValue::Boolean(b) => b.to_string(),
+                    JsonValue::Null => "null".to_string()
                 };
                 result = result.replace(&format!("${}", name), &value_str);
             }
