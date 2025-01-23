@@ -3,6 +3,7 @@ use nom::{
     bytes::complete::{tag, take_until},
     character::complete::multispace0,
     combinator::map,
+    error::Error as NomError,
     multi::many0,
     sequence::{delimited, preceded, terminated},
     IResult,
@@ -31,13 +32,13 @@ impl ToString for TemplateSegment {
     }
 }
 
-fn parse_variable(input: &str) -> IResult<&str, TemplateSegment> {
+fn parse_variable(input: &str) -> IResult<&str, TemplateSegment, NomError<&str>> {
     let var_parser = delimited(
         tag("{{"),
         preceded(
             multispace0,
             terminated(
-                take_until("}}"),
+                take_until::<_, _, NomError<&str>>("}}"),
                 multispace0,
             ),
         ),
@@ -49,31 +50,54 @@ fn parse_variable(input: &str) -> IResult<&str, TemplateSegment> {
     })(input)
 }
 
-fn parse_each_loop(input: &str) -> IResult<&str, TemplateSegment> {
+fn parse_each_loop(input: &str) -> IResult<&str, TemplateSegment, NomError<&str>> {
     let (input, _) = tag("{{")(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("#each")(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, path) = take_until("}}")(input)?;
+    let (input, path) = take_until::<_, _, NomError<&str>>("}}")(input)?;
     let (input, _) = tag("}}")(input)?;
-    let (input, body) = take_until("{{/each}}")(input)?;
+    
+    // Capture the body including any newlines
+    let (input, body) = take_until::<_, _, NomError<&str>>("{{/each}}")(input)?;
     let (input, _) = tag("{{/each}}")(input)?;
     
     let path = path.trim().to_string();
-    let (_, mut body_segments) = parse_template(body)?;
+    
+    // Parse the body, preserving all whitespace and newlines
+    let (_, body_segments) = parse_template(body)?;
+    
+    // Preserve body segments exactly as parsed
+    let mut final_segments = body_segments;
     
     Ok((input, TemplateSegment::EachLoop {
         path,
-        body: body_segments,
+        body: final_segments,
     }))
 }
 
-fn parse_text(input: &str) -> IResult<&str, TemplateSegment> {
-    let (input, text) = take_until("{{")(input)?;
-    Ok((input, TemplateSegment::Text(text.to_string())))
+fn parse_text(input: &str) -> IResult<&str, TemplateSegment, NomError<&str>> {
+    // First try to parse until next template tag
+    let result = take_until::<_, _, NomError<&str>>("{{");
+    match result(input) {
+        Ok((remaining, text)) => {
+            Ok((remaining, TemplateSegment::Text(text.to_string())))
+        },
+        // If no template tags found, take all remaining text
+        Err(_) => {
+            if !input.is_empty() {
+                Ok(("", TemplateSegment::Text(input.to_string())))
+            } else {
+                Err(nom::Err::Error(NomError::new(
+                    input,
+                    nom::error::ErrorKind::TakeUntil,
+                )))
+            }
+        }
+    }
 }
 
-pub fn parse_template(input: &str) -> IResult<&str, Vec<TemplateSegment>> {
+pub fn parse_template(input: &str) -> IResult<&str, Vec<TemplateSegment>, NomError<&str>> {
     many0(alt((
         parse_each_loop,
         parse_variable,
@@ -129,5 +153,35 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_template_with_newlines() {
+        let input = "Hello\n{{#each items}}\n{{.}}\n{{/each}}\nGoodbye";
+        let (rest, result) = parse_template(input).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            result,
+            vec![
+                TemplateSegment::Text("Hello\n".to_string()),
+                TemplateSegment::EachLoop {
+                    path: "items".to_string(),
+                    body: vec![
+                        TemplateSegment::Text("\n".to_string()),
+                        TemplateSegment::Variable(".".to_string()),
+                        TemplateSegment::Text("\n".to_string()),
+                    ],
+                },
+                TemplateSegment::Text("\nGoodbye".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_text_with_newlines() {
+        let input = "First line\nSecond line\nThird line";
+        let (rest, result) = parse_text(input).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(result, TemplateSegment::Text("First line\nSecond line\nThird line".to_string()));
     }
 }

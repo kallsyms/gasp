@@ -250,15 +250,15 @@ impl<'a> WAILMainDef<'a> {
                                                         parts.join(", ")
                                                     },
                                                     JsonValue::Array(arr) => {
-                                                        let mut parts = Vec::new();
-                                                        for v in arr {
-                                                            match v {
-                                                                JsonValue::String(s) => parts.push(s.clone()),
-                                                                JsonValue::Number(n) => parts.push(n.to_string()),
-                                                                _ => parts.push(v.to_string().trim_matches('"').to_string())
-                                                            }
-                                                        }
-                                                        parts.join(", ")
+                                                let mut parts = Vec::new();
+                                                for v in arr {
+                                                    match v {
+                                                        JsonValue::String(s) => parts.push(s.clone()),
+                                                        JsonValue::Number(n) => parts.push(n.to_string()),
+                                                        _ => parts.push(v.to_string().trim_matches('"').to_string())
+                                                    }
+                                                }
+                                                parts.join("\n")
                                                     },
                                                     JsonValue::Boolean(b) => b.to_string(),
                                                     JsonValue::Null => "null".to_string()
