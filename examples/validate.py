@@ -7,6 +7,8 @@ def main():
     generator = WAILGenerator()
 
     # Load a WAIL schema with an intentional typo
+    with open("./ideal.wail", "r") as f:
+        ideal_wail_schema = f.read()
     wail_schema = '''
 object Person {
     name: String
@@ -32,6 +34,7 @@ main {
 }
 '''
 
+    wail_schema = ideal_wail_schema
     generator.load_wail(wail_schema)
 
     # Validate the schema
