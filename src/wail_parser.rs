@@ -979,13 +979,9 @@ impl<'a> WAILParser<'a> {
         &'a self,
         input: &'a str,
     ) -> IResult<&'a str, (String, WAILType<'a>), ErrorTree<&'a str>> {
-        println!("{:?}", input);
         let (input, name) = self.identifier(input)?;
         let (input, _) = tuple((multispace0, char(':'), multispace0))(input)?;
         let (input, (arg_type, _)) = self.parse_type(input, None)?;
-
-        println!("{:?}", input);
-        println!("------------------------");
 
         Ok((input, (name.to_string(), arg_type)))
     }
