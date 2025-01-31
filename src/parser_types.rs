@@ -181,13 +181,21 @@ impl<'a> WAILMainDef<'a> {
                             object_type,
                             arguments,
                         } if variable == &var_name => {
-                            // For object instantiations, format as a JSON object
+                            // For object instantiations, format as a proper JSON object with quoted values
                             let mut obj = HashMap::new();
                             for (key, value) in arguments {
-                                obj.insert(key.clone(), value.to_string());
+                                let formatted_value = match value {
+                                    TemplateArgument::String(s) => format!("\"{}\"", s),
+                                    TemplateArgument::Number(n) => n.to_string(),
+                                    TemplateArgument::Float(f) => f.to_string(),
+                                    TemplateArgument::TypeRef(t) => format!("\"{}\"", t),
+                                    TemplateArgument::TemplateArgRef(t) => format!("\"${}\"", t),
+                                };
+                                obj.insert(key.clone(), formatted_value);
                             }
                             Some(format!(
-                                "{{ {} }}",
+                                "{{\"type\": \"{}\", {}}}",
+                                object_type,
                                 obj.iter()
                                     .map(|(k, v)| format!("\"{}\": {}", k, v))
                                     .collect::<Vec<_>>()

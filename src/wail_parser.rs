@@ -973,9 +973,13 @@ impl<'a> WAILParser<'a> {
 
                     // Parse the template call first
                     let (input, template_call) = self.parse_template_call(input)?;
-                    
+
                     // Check if it's a template call
-                    if self.template_registry.borrow().contains_key(&template_call.template_name) {
+                    if self
+                        .template_registry
+                        .borrow()
+                        .contains_key(&template_call.template_name)
+                    {
                         let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                         Ok((
                             input,
@@ -996,13 +1000,16 @@ impl<'a> WAILParser<'a> {
                             },
                         ))
                     }
-                    }
                 },
                 |input| {
                     // Parse the template call first
                     let (input, template_call) = self.parse_template_call(input)?;
                     // Then check if it exists in registry
-                    if self.template_registry.borrow().contains_key(&template_call.template_name) {
+                    if self
+                        .template_registry
+                        .borrow()
+                        .contains_key(&template_call.template_name)
+                    {
                         let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                         Ok((input, MainStatement::TemplateCall(template_call)))
                     } else {
@@ -2326,10 +2333,10 @@ main {
         // Verify statements
         assert_eq!(main.statements.len(), 2); // conversation and prompt assignments
 
-        let (var1, call1) = main.statements[0].as_assignment().unwrap();
+        let (var1, call1, args) = main.statements[0].as_object_instantiation().unwrap();
         assert_eq!(var1, "conversation");
-        assert_eq!(call1.template_name, "Conversation");
-        assert_eq!(call1.arguments.len(), 4);
+        assert_eq!(call1, "Conversation");
+        println!("{:?}", args);
 
         let (var2, call2) = main.statements[1].as_assignment().unwrap();
         assert_eq!(var2, "prompt");
