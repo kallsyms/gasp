@@ -305,7 +305,11 @@ impl<'a> WAILParser<'a> {
             } = stmt
             {
                 // Check if this is a template call or object instantiation
-                if !self.template_registry.borrow().contains_key(&template_call.template_name) {
+                if !self
+                    .template_registry
+                    .borrow()
+                    .contains_key(&template_call.template_name)
+                {
                     // If not in template registry, treat as object instantiation
                     if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
                         if let WAILType::Composite(WAILCompositeType::Object(_)) = obj.field_type {
@@ -966,65 +970,46 @@ impl<'a> WAILParser<'a> {
                     let (input, _) = tuple((multispace0, tag("let"), multispace1))(input)?;
                     let (input, var_name) = self.identifier(input)?;
                     let (input, _) = tuple((multispace0, char('='), multispace0))(input)?;
+
+                    // Parse the template call first
+                    let (input, template_call) = self.parse_template_call(input)?;
                     
-                    // Look ahead to get the identifier
-                    let (peek_input, identifier) = self.identifier(input)?;
-                    
-                    // Check if this is a template
-                    if self.template_registry.borrow().contains_key(identifier) {
-                        // Parse as template call
-                        let (input, template_call) = self.parse_template_call(input)?;
+                    // Check if it's a template call
+                    if self.template_registry.borrow().contains_key(&template_call.template_name) {
                         let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                         Ok((
                             input,
                             MainStatement::Assignment {
                                 variable: var_name.to_string(),
-                                template_call: template_call,
+                                template_call: template_call.clone(),
                             },
                         ))
                     } else {
-                        // Parse as object instantiation
-                        let (input, object_type) = Ok((peek_input, identifier))?;
-                        let (input, _) = tuple((multispace0, char('('), multispace0))(input)?;
-                        
-                        // Parse arguments
-                        let (input, args) = separated_list0(
-                            tuple((multispace0, char(','), multispace0)),
-                            |i| self.parse_argument(i)
-                        )(input)?;
-                        
-                        let (input, _) = tuple((multispace0, char(')'), multispace0, char(';'), multispace0))(input)?;
-                        
-                        let mut arguments = HashMap::new();
-                        for (name, value) in args {
-                            arguments.insert(name, value);
-                        }
-                        
+                        // Treat as object instantiation
+                        let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                         Ok((
                             input,
                             MainStatement::ObjectInstantiation {
                                 variable: var_name.to_string(),
-                                object_type: object_type.to_string(),
-                                arguments,
+                                object_type: template_call.template_name,
+                                arguments: template_call.arguments,
                             },
                         ))
                     }
                     }
                 },
                 |input| {
-                    // Look ahead to get the identifier
-                    let (peek_input, identifier) = self.identifier(input)?;
-                    
-                    // Only parse as template call if identifier exists in registry
-                    if self.template_registry.borrow().contains_key(identifier) {
-                        let (input, template_call) = self.parse_template_call(input)?;
+                    // Parse the template call first
+                    let (input, template_call) = self.parse_template_call(input)?;
+                    // Then check if it exists in registry
+                    if self.template_registry.borrow().contains_key(&template_call.template_name) {
                         let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                         Ok((input, MainStatement::TemplateCall(template_call)))
                     } else {
                         // Not a valid template call
                         Err(nom::Err::Error(ErrorTree::from_error_kind(
                             input,
-                            nom::error::ErrorKind::Tag
+                            nom::error::ErrorKind::Tag,
                         )))
                     }
                 },
