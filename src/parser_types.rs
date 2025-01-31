@@ -538,6 +538,17 @@ impl MainStatement {
             _ => None,
         }
     }
+
+    pub fn as_object_instantiation(&self) -> Option<(&String, &String, &HashMap<String, TemplateArgument>)> {
+        match self {
+            MainStatement::ObjectInstantiation {
+                variable,
+                object_type,
+                arguments,
+            } => Some((variable, object_type, arguments)),
+            _ => None,
+        }
+    }
 }
 
 fn count_leading_whitespace(s: &str) -> usize {
