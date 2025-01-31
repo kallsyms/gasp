@@ -958,7 +958,7 @@ impl<'a> WAILParser<'a> {
             Ok((input, args_map))
         })(input)?;
 
-        // Parse statements (assignments and template calls)
+        // Parse statements (assignments, template calls, and object instantiations)
         let (input, statements) = many0(|i| {
             let (i, statement) = alt((
                 |input| {
@@ -966,15 +966,47 @@ impl<'a> WAILParser<'a> {
                     let (input, _) = tuple((multispace0, tag("let"), multispace1))(input)?;
                     let (input, var_name) = self.identifier(input)?;
                     let (input, _) = tuple((multispace0, char('='), multispace0))(input)?;
-                    let (input, template_call) = self.parse_template_call(input)?;
-                    let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
-                    Ok((
-                        input,
-                        MainStatement::Assignment {
-                            variable: var_name.to_string(),
-                            template_call: template_call,
-                        },
-                    ))
+                    
+                    // Try parsing as template call first
+                    match self.parse_template_call(input) {
+                        Ok((input, template_call)) => {
+                            let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
+                            Ok((
+                                input,
+                                MainStatement::Assignment {
+                                    variable: var_name.to_string(),
+                                    template_call: template_call,
+                                },
+                            ))
+                        }
+                        Err(_) => {
+                            // If not a template call, try parsing as object instantiation
+                            let (input, object_type) = self.identifier(input)?;
+                            let (input, _) = tuple((multispace0, char('('), multispace0))(input)?;
+                            
+                            // Parse arguments
+                            let (input, args) = separated_list0(
+                                tuple((multispace0, char(','), multispace0)),
+                                |i| self.parse_argument(i)
+                            )(input)?;
+                            
+                            let (input, _) = tuple((multispace0, char(')'), multispace0, char(';'), multispace0))(input)?;
+                            
+                            let mut arguments = HashMap::new();
+                            for (name, value) in args {
+                                arguments.insert(name, value);
+                            }
+                            
+                            Ok((
+                                input,
+                                MainStatement::ObjectInstantiation {
+                                    variable: var_name.to_string(),
+                                    object_type: object_type.to_string(),
+                                    arguments,
+                                },
+                            ))
+                        }
+                    }
                 },
                 |input| {
                     // Parse regular template call: template_call;
