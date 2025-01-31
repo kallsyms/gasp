@@ -186,10 +186,13 @@ impl<'a> WAILMainDef<'a> {
                             for (key, value) in arguments {
                                 obj.insert(key.clone(), value.to_string());
                             }
-                            Some(format!("{{ {} }}", obj.iter()
-                                .map(|(k, v)| format!("\"{}\": {}", k, v))
-                                .collect::<Vec<_>>()
-                                .join(", ")))
+                            Some(format!(
+                                "{{ {} }}",
+                                obj.iter()
+                                    .map(|(k, v)| format!("\"{}\": {}", k, v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
                         }
                         _ => None,
                     });
@@ -494,8 +497,13 @@ impl<'a> WAILMainDef<'a> {
                     println!("Value: {:?}", value);
                     template_output.field_type.validate_json(value)?;
                 }
-                MainStatement::Comment(_) => {},
-                MainStatement::ObjectInstantiation { variable, object_type, .. } => {
+                MainStatement::Comment(_) => {}
+
+                MainStatement::ObjectInstantiation {
+                    variable,
+                    object_type,
+                    ..
+                } => {
                     // Get the corresponding value from JSON response
                     let value = match json {
                         JsonValue::Object(map) => map.get(variable).ok_or_else(|| {

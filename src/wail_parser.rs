@@ -247,14 +247,20 @@ impl<'a> WAILParser<'a> {
         Ok(JsonValue::Object(result))
     }
 
-    fn instantiate_object(&'a self, object_type: &str, args: HashMap<String, TemplateArgument>) -> Result<WAILObject<'a>, String> {
+    fn instantiate_object(
+        &'a self,
+        object_type: &str,
+        args: HashMap<String, TemplateArgument>,
+    ) -> Result<WAILObject<'a>, String> {
         // Get the object definition from registry
         let registry = self.registry.borrow();
-        let field = registry.get(object_type).ok_or_else(|| format!("Type not found: {}", object_type))?;
-        
+        let field = registry
+            .get(object_type)
+            .ok_or_else(|| format!("Type not found: {}", object_type))?;
+
         if let WAILType::Composite(WAILCompositeType::Object(obj)) = &field.field_type {
             let mut field_map = HashMap::new();
-            
+
             // Get field definitions
             if let Some(field_defs) = &obj.type_data.field_definitions {
                 for field in field_defs {
@@ -267,14 +273,14 @@ impl<'a> WAILParser<'a> {
                                     type_name: "String",
                                     field_definitions: None,
                                     element_type: None,
-                                }
+                                },
                             },
                             field.field_type.clone(),
                         );
                     }
                 }
             }
-            
+
             Ok(WAILObject {
                 value: field_map,
                 type_data: obj.type_data.clone(),
@@ -285,7 +291,7 @@ impl<'a> WAILParser<'a> {
     }
 
     pub fn prepare_prompt(
-        &self,
+        &'a self,
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> String {
         let main = self.main.borrow();
@@ -293,13 +299,25 @@ impl<'a> WAILParser<'a> {
 
         // Process statements to instantiate objects
         for stmt in &main.statements {
-            if let MainStatement::Assignment { variable, template_call } = stmt {
-                // If this is an object instantiation
-                if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
-                    if let WAILType::Composite(WAILCompositeType::Object(_)) = obj.field_type {
-                        // Instantiate the object and store it
-                        if let Ok(instance) = self.instantiate_object(&template_call.template_name, template_call.arguments.clone()) {
-                            self.object_instances.borrow_mut().insert(variable.clone(), instance);
+            if let MainStatement::Assignment {
+                variable,
+                template_call,
+            } = stmt
+            {
+                // Check if this is a template call or object instantiation
+                if !self.template_registry.borrow().contains_key(&template_call.template_name) {
+                    // If not in template registry, treat as object instantiation
+                    if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
+                        if let WAILType::Composite(WAILCompositeType::Object(_)) = obj.field_type {
+                            // Instantiate the object and store it
+                            if let Ok(instance) = self.instantiate_object(
+                                &template_call.template_name,
+                                template_call.arguments.clone(),
+                            ) {
+                                self.object_instances
+                                    .borrow_mut()
+                                    .insert(variable.clone(), instance);
+                            }
                         }
                     }
                 }
