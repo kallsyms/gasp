@@ -47,6 +47,11 @@ pub enum MainStatement {
         variable: String,
         template_call: WAILTemplateCall,
     },
+    ObjectInstantiation {
+        variable: String,
+        object_type: String,
+        arguments: HashMap<String, TemplateArgument>,
+    },
     TemplateCall(WAILTemplateCall),
     Comment(String),
 }
@@ -139,18 +144,22 @@ impl<'a> WAILMainDef<'a> {
     pub fn interpolate_prompt(
         &self,
         template_registry: &HashMap<String, WAILTemplateDef>,
+        registry: &HashMap<String, WAILField>,
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
 
         use crate::template_parser::{parse_template, TemplateSegment};
 
+        println!("{:?}", self.statements);
         // Parse the template into nodes
         let nodes =
             parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
 
         let mut output = String::new();
         let (_, segments) = nodes;
+
+        println!("Segments: {:?}", segments);
         for node in segments {
             match node {
                 TemplateSegment::Text(text) => output.push_str(&text),
@@ -161,10 +170,26 @@ impl<'a> WAILMainDef<'a> {
                             variable,
                             template_call,
                         } if variable == &var_name => {
+                            println!("{:?}", var_name);
                             let template = template_registry.get(&template_call.template_name)?;
                             template
                                 .interpolate_prompt(Some(&template_call.arguments))
                                 .ok()
+                        }
+                        MainStatement::ObjectInstantiation {
+                            variable,
+                            object_type,
+                            arguments,
+                        } if variable == &var_name => {
+                            // For object instantiations, format as a JSON object
+                            let mut obj = HashMap::new();
+                            for (key, value) in arguments {
+                                obj.insert(key.clone(), value.to_string());
+                            }
+                            Some(format!("{{ {} }}", obj.iter()
+                                .map(|(k, v)| format!("\"{}\": {}", k, v))
+                                .collect::<Vec<_>>()
+                                .join(", ")))
                         }
                         _ => None,
                     });
@@ -374,14 +399,21 @@ impl<'a> WAILMainDef<'a> {
                                 JsonValue::Number(n) => n.to_string(),
                                 JsonValue::Boolean(b) => b.to_string(),
                                 JsonValue::Null => "null".to_string(),
-                                JsonValue::Array(arr) => format!("[{}]", arr.iter()
-                                    .map(|v| v.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")),
-                                JsonValue::Object(inner_obj) => format!("{{{}}}", inner_obj.iter()
-                                    .map(|(k, v)| format!("\"{}\": {}", k, v))
-                                    .collect::<Vec<_>>()
-                                    .join(", "))
+                                JsonValue::Array(arr) => format!(
+                                    "[{}]",
+                                    arr.iter()
+                                        .map(|v| v.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                JsonValue::Object(inner_obj) => format!(
+                                    "{{{}}}",
+                                    inner_obj
+                                        .iter()
+                                        .map(|(k, v)| format!("\"{}\": {}", k, v))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
                             };
                             parts.push(format!("\"{}\": {}", k, value_str));
                         }
@@ -482,7 +514,7 @@ impl MainStatement {
             MainStatement::Assignment {
                 variable,
                 template_call,
-            } => Some((variable, template_call)),
+            } => Some((variable, &template_call)),
             _ => None,
         }
     }
@@ -706,9 +738,10 @@ impl<'a> WAILTemplateDef<'a> {
                 .join("\n");
 
             let return_prompt = format!(
-                "\nReturn a JSON-like format wrapped in ```gasp fences:\n\n{}",
+                "\nAnswer in JSON using this schema:\n\n{}\nWrap your response in ```gasp fences.\n ANSWER:\n```gasp\n",
                 indented_schema
             );
+
             prompt = re.replace(&prompt, &return_prompt).to_string();
         }
 
@@ -735,7 +768,9 @@ mod tests {
 
     main {
         let person = GetPerson(description: "test");
-        prompt { {{person}} }
+        prompt { 
+            {{person}} 
+        }
     }"#;
 
         let parser = WAILParser::new();
@@ -858,9 +893,10 @@ mod tests {
         );
 
         let template_registry = HashMap::new();
+        let registry = HashMap::new();
         let arg_values = create_test_json();
 
-        let result = main_def.interpolate_prompt(&template_registry, Some(&arg_values));
+        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&arg_values));
         assert_eq!(result.unwrap(), "Hobby: reading\nHobby: gaming");
     }
 
@@ -889,7 +925,8 @@ mod tests {
         );
 
         let template_registry = HashMap::new();
-        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
+        let registry = HashMap::new();
+        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&json));
         assert_eq!(result.unwrap(), "Pet: Fluffy is a cat\nPet: Rover is a dog");
     }
 
@@ -901,8 +938,9 @@ mod tests {
 
         let main_def = WAILMainDef::new(vec![], template, None);
         let template_registry = HashMap::new();
+        let registry = HashMap::new();
 
-        let result = main_def.interpolate_prompt(&template_registry, Some(&json));
+        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&json));
         let expected = "User John (30) lives in Springfield.\nHobbies:\n* reading\n\n* gaming\n";
 
         assert_eq!(result.unwrap(), expected);

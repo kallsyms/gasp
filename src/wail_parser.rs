@@ -1,4 +1,4 @@
-use crate::json_types::{JsonError, JsonValue, Number};
+use crate::json_types::{JsonValue, Number};
 use crate::parser_types::*;
 use crate::rd_json_stack_parser::Parser as JsonParser;
 use crate::types::*;
@@ -6,21 +6,18 @@ use nom::error::ParseError;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
-    character::complete::{alpha1, char, multispace0, multispace1},
+    character::complete::{char, multispace0, multispace1},
     combinator::opt,
     multi::{many0, many1, separated_list0},
     sequence::{delimited, preceded, tuple},
-    Err, IResult,
+    IResult,
 };
 
 use nom_supreme::final_parser::Location;
-use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ops::Add;
 
-use nom_supreme::error::{BaseErrorKind, ErrorTree, Expectation, StackContext};
-use nom_supreme::parser_ext::ParserExt;
+use nom_supreme::error::{BaseErrorKind, ErrorTree};
 
 fn error_location(e: nom::Err<ErrorTree<&str>>, original_input: &str) -> Location {
     let location = match e {
@@ -69,14 +66,6 @@ pub enum WAILParseError {
     },
 }
 
-// Helper function to get line and column from input
-fn get_position(full_input: &str, current_pos: usize) -> (usize, usize) {
-    let preceding = &full_input[..current_pos];
-    let line = preceding.chars().filter(|&c| c == '\n').count() + 1;
-    let column = preceding.chars().rev().take_while(|&c| c != '\n').count() + 1;
-    (line, column)
-}
-
 fn count_leading_whitespace(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
 }
@@ -120,6 +109,8 @@ pub struct WAILParser<'a> {
     adhoc_obj_ids: RefCell<Vec<String>>,
     adhoc_obj_refs: RefCell<HashMap<String, WAILObject<'a>>>,
     main: RefCell<Option<WAILMainDef<'a>>>,
+    // Track object instantiations with their variable names
+    object_instances: RefCell<HashMap<String, WAILObject<'a>>>,
 }
 
 impl<'a> WAILParser<'a> {
@@ -131,6 +122,7 @@ impl<'a> WAILParser<'a> {
             adhoc_obj_refs: RefCell::new(HashMap::new()),
             adhoc_obj_ids: RefCell::new(Vec::new()),
             main: RefCell::new(None),
+            object_instances: RefCell::new(HashMap::new()),
         }
     }
 
@@ -255,16 +247,72 @@ impl<'a> WAILParser<'a> {
         Ok(JsonValue::Object(result))
     }
 
+    fn instantiate_object(&'a self, object_type: &str, args: HashMap<String, TemplateArgument>) -> Result<WAILObject<'a>, String> {
+        // Get the object definition from registry
+        let registry = self.registry.borrow();
+        let field = registry.get(object_type).ok_or_else(|| format!("Type not found: {}", object_type))?;
+        
+        if let WAILType::Composite(WAILCompositeType::Object(obj)) = &field.field_type {
+            let mut field_map = HashMap::new();
+            
+            // Get field definitions
+            if let Some(field_defs) = &obj.type_data.field_definitions {
+                for field in field_defs {
+                    if let Some(arg) = args.get(&field.name) {
+                        field_map.insert(
+                            WAILString {
+                                value: field.name.clone(),
+                                type_data: WAILTypeData {
+                                    json_type: JsonValue::String(field.name.clone()),
+                                    type_name: "String",
+                                    field_definitions: None,
+                                    element_type: None,
+                                }
+                            },
+                            field.field_type.clone(),
+                        );
+                    }
+                }
+            }
+            
+            Ok(WAILObject {
+                value: field_map,
+                type_data: obj.type_data.clone(),
+            })
+        } else {
+            Err(format!("{} is not an object type", object_type))
+        }
+    }
+
     pub fn prepare_prompt(
         &self,
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> String {
-        self.main
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .interpolate_prompt(&self.template_registry.borrow(), template_arg_values)
-            .unwrap()
+        let main = self.main.borrow();
+        let main = main.as_ref().unwrap();
+
+        // Process statements to instantiate objects
+        for stmt in &main.statements {
+            if let MainStatement::Assignment { variable, template_call } = stmt {
+                // If this is an object instantiation
+                if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
+                    if let WAILType::Composite(WAILCompositeType::Object(_)) = obj.field_type {
+                        // Instantiate the object and store it
+                        if let Ok(instance) = self.instantiate_object(&template_call.template_name, template_call.arguments.clone()) {
+                            self.object_instances.borrow_mut().insert(variable.clone(), instance);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now proceed with prompt interpolation
+        main.interpolate_prompt(
+            &self.template_registry.borrow(),
+            &self.registry.borrow(),
+            template_arg_values,
+        )
+        .unwrap()
     }
 
     pub fn parse_wail_file(
@@ -906,7 +954,7 @@ impl<'a> WAILParser<'a> {
                         input,
                         MainStatement::Assignment {
                             variable: var_name.to_string(),
-                            template_call,
+                            template_call: template_call,
                         },
                     ))
                 },
@@ -1282,6 +1330,8 @@ pub enum ValidationError {
 // Add test that tries parsing a basic object
 #[cfg(test)]
 mod tests {
+    use std::hash::Hash;
+
     use super::*;
 
     #[test]
@@ -1647,8 +1697,11 @@ Return in this format: {{return_type}}"#
                 assert_eq!(call2.arguments.len(), 1);
 
                 // Test prompt interpolation
-                let registry = parser.template_registry.borrow().clone();
-                let interpolated = main.interpolate_prompt(&registry, None).unwrap();
+                let template_registry = parser.template_registry.borrow().clone();
+                let registry = parser.registry.borrow().clone();
+                let interpolated = main
+                    .interpolate_prompt(&template_registry, &registry, None)
+                    .unwrap();
 
                 println!("Interpolated prompt:\n{}", interpolated);
                 assert!(interpolated.contains("Given this description of a person:"));
@@ -1986,6 +2039,92 @@ Return in this format: {{return_type}}"#
 
         let result = parser.validate_json(&res.unwrap().to_string());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_object_as_argument_to_func() {
+        let parser = WAILParser::new();
+        let input = r#"
+        object Article {
+            content: String
+            url: String
+        }
+
+        object ArticleMetadata {
+            authors: String[]
+            headline: String
+            publishDate: String
+            categories: String[]
+            keywords: String[]
+            summary: String
+            sentiment: String
+        }
+
+        object ProcessedArticle {
+            article: Article
+            metadata: ArticleMetadata
+        }
+
+        template ExtractInformation(article: Article) -> ProcessedArticle {
+            prompt: """
+            You are an AI assistant specialized in analyzing news articles.
+            Please extract and structure the following information from this article:
+
+            Article Information:
+            URL: {{article.url}}
+
+            Content to analyze:
+            {{article.content}}
+
+            Extract key information including:
+            1. Main categories/topics
+            2. Important keywords
+            3. Brief summary (2-3 sentences)
+            4. Overall sentiment (positive/negative/neutral)
+
+            Provide structured output following the ArticleMetadata format.
+            {{return_type}}
+            """
+        }
+
+        main {
+            template_args {
+                url: String,
+                content: String
+            }
+
+            let article = Article(
+                content: $content,
+                url: $url
+            );
+
+            let res = ExtractInformation(article: article);
+
+            prompt {
+                Process the following news article and extract structured information:
+                {{res}}
+            }
+        }
+        "#;
+        let result = parser.parse_wail_file(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse ideal.wail: {:?}",
+            result.err()
+        );
+
+        let template_args = HashMap::from([
+            (
+                "content".to_string(),
+                JsonValue::String("I am an article".to_string()),
+            ),
+            (
+                "url".to_string(),
+                JsonValue::String("www.example.com".to_string()),
+            ),
+        ]);
+
+        parser.prepare_prompt(Some(&template_args));
     }
 
     #[test]

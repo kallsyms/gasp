@@ -160,8 +160,6 @@ impl WAILGenerator {
             None
         };
 
-        println!("template_arg_values: {:?}", template_arg_values);
-
         // First parse and validate the WAIL schema
         match parser.parse_wail_file(&self.wail_content) {
             Ok(_) => {
