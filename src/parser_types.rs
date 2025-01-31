@@ -494,7 +494,19 @@ impl<'a> WAILMainDef<'a> {
                     println!("Value: {:?}", value);
                     template_output.field_type.validate_json(value)?;
                 }
-                MainStatement::Comment(_) => {}
+                MainStatement::Comment(_) => {},
+                MainStatement::ObjectInstantiation { variable, object_type, .. } => {
+                    // Get the corresponding value from JSON response
+                    let value = match json {
+                        JsonValue::Object(map) => map.get(variable).ok_or_else(|| {
+                            format!("Missing output for object instantiation: {}", variable)
+                        })?,
+                        _ => return Err("Expected object response from LLM".to_string()),
+                    };
+
+                    // Validate the value matches the object type
+                    // TODO: Look up object type definition and validate against it
+                }
             }
         }
         Ok(())
