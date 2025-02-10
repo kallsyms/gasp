@@ -170,8 +170,9 @@ impl<'a> WAILMainDef<'a> {
                             variable,
                             template_call,
                         } if variable == &var_name => {
-                            println!("{:?}", var_name);
+                            println!("HERE {:?}", var_name);
                             let template = template_registry.get(&template_call.template_name)?;
+
                             template
                                 .interpolate_prompt(Some(&template_call.arguments))
                                 .ok()
@@ -204,6 +205,8 @@ impl<'a> WAILMainDef<'a> {
                         }
                         _ => None,
                     });
+
+                    println!("Replacement: {:?}", replacement);
 
                     let value = if let Some(template_result) = replacement {
                         template_result
@@ -547,7 +550,9 @@ impl MainStatement {
         }
     }
 
-    pub fn as_object_instantiation(&self) -> Option<(&String, &String, &HashMap<String, TemplateArgument>)> {
+    pub fn as_object_instantiation(
+        &self,
+    ) -> Option<(&String, &String, &HashMap<String, TemplateArgument>)> {
         match self {
             MainStatement::ObjectInstantiation {
                 variable,
@@ -571,14 +576,20 @@ impl<'a> WAILTemplateDef<'a> {
         let mut prompt = self.prompt_template.clone();
 
         // Handle input parameters
+
         for input in &self.inputs {
             let placeholder = format!("{{{{{}}}}}", input.name);
+            println!("Placeholder: {}", placeholder);
             if !prompt.contains(&placeholder) {
                 return Err(format!("Missing placeholder for input: {}", input.name));
             }
 
+            println!("Arguments: {:?}", arguments);
+
             if let Some(arguments) = arguments {
                 let argument = arguments.get(&input.name).unwrap();
+
+                println!("Argument: {:?}", argument);
                 prompt = prompt.replace(&placeholder, &argument.to_string());
             } else {
                 let mut param_info = String::new();

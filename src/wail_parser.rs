@@ -297,37 +297,6 @@ impl<'a> WAILParser<'a> {
         let main = self.main.borrow();
         let main = main.as_ref().unwrap();
 
-        // Process statements to instantiate objects
-        for stmt in &main.statements {
-            if let MainStatement::Assignment {
-                variable,
-                template_call,
-            } = stmt
-            {
-                // Check if this is a template call or object instantiation
-                if !self
-                    .template_registry
-                    .borrow()
-                    .contains_key(&template_call.template_name)
-                {
-                    // If not in template registry, treat as object instantiation
-                    if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
-                        if let WAILType::Composite(WAILCompositeType::Object(_)) = obj.field_type {
-                            // Instantiate the object and store it
-                            if let Ok(instance) = self.instantiate_object(
-                                &template_call.template_name,
-                                template_call.arguments.clone(),
-                            ) {
-                                self.object_instances
-                                    .borrow_mut()
-                                    .insert(variable.clone(), instance);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // Now proceed with prompt interpolation
         main.interpolate_prompt(
             &self.template_registry.borrow(),
@@ -905,6 +874,11 @@ impl<'a> WAILParser<'a> {
         &'a self,
         input: &'a str,
     ) -> IResult<&'a str, TemplateArgument, ErrorTree<&'a str>> {
+        // First check if this is a variable reference
+        if let Some(var_name) = self.object_instances.borrow().keys().find(|k| *k == input) {
+            return Ok(("", TemplateArgument::TemplateArgRef(var_name.clone())));
+        }
+
         alt((
             |i| self.parse_string_literal(i),
             |i| self.parse_number(i),
@@ -918,17 +892,56 @@ impl<'a> WAILParser<'a> {
     ) -> IResult<&'a str, (String, TemplateArgument), ErrorTree<&'a str>> {
         let (input, name) = self.identifier(input)?;
         let (input, _) = tuple((multispace0, char(':'), multispace0))(input)?;
+        // First try to parse a template arg reference with $ prefix
+        if let Ok((remaining, _)) = char::<&str, ErrorTree<&str>>('$')(input) {
+            let (remaining, arg_name) = self.identifier(remaining)?;
+            return Ok((
+                remaining,
+                (
+                    name.to_string(),
+                    TemplateArgument::TemplateArgRef(arg_name.to_string()),
+                ),
+            ));
+        }
 
-        // Handle both template arg references and literal values
+        // Try to parse identifier first
+        let (input, value_str) = self.identifier(input)?;
+
+        println!("{:?}", self.object_instances.borrow());
+        println!("{:?}", self.registry.borrow().keys());
+        println!("{:?}", self.template_registry.borrow().keys());
+
+        // Check if this is an object instance reference
+        if self.object_instances.borrow().contains_key(value_str) {
+            return Ok((
+                input,
+                (
+                    name.to_string(),
+                    TemplateArgument::TemplateArgRef(value_str.to_string()),
+                ),
+            ));
+        }
+
+        // Check if this is an object type that exists in the registry
+        if self.registry.borrow().contains_key(value_str) {
+            if let Some(field) = self.registry.borrow().get(value_str) {
+                if let WAILType::Composite(WAILCompositeType::Object(_)) = &field.field_type {
+                    return Ok((
+                        input,
+                        (
+                            name.to_string(),
+                            TemplateArgument::TypeRef(value_str.to_string()),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // If not an object reference or type, try parsing as a literal value
         let (input, value) = alt((
-            // Parse template arg reference with $ prefix
-            |i| {
-                let (i, _) = char('$')(i)?;
-                let (i, arg_name) = self.identifier(i)?;
-                Ok((i, TemplateArgument::TemplateArgRef(arg_name.to_string())))
-            },
-            // Existing value parsing
-            |i| self.parse_value(i),
+            |i| self.parse_string_literal(i),
+            |i| self.parse_number(i),
+            |i| self.parse_type_ref(i),
         ))(input)?;
 
         Ok((input, (name.to_string(), value)))
@@ -974,7 +987,33 @@ impl<'a> WAILParser<'a> {
                     // Parse the template call first
                     let (input, template_call) = self.parse_template_call(input)?;
 
-                    // Check if it's a template call
+                    // First check if it's an object instantiation
+                    if let Some(obj) = self.registry.borrow().get(&template_call.template_name) {
+                        if let WAILType::Composite(WAILCompositeType::Object(_)) = &obj.field_type {
+                            let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
+                            let obj = self
+                                .instantiate_object(
+                                    &template_call.template_name,
+                                    template_call.arguments.clone(),
+                                )
+                                .unwrap();
+
+                            self.object_instances
+                                .borrow_mut()
+                                .insert(var_name.to_string(), obj);
+
+                            return Ok((
+                                input,
+                                MainStatement::ObjectInstantiation {
+                                    variable: var_name.to_string(),
+                                    object_type: template_call.template_name,
+                                    arguments: template_call.arguments,
+                                },
+                            ));
+                        }
+                    }
+
+                    // Then check if it's a template call
                     if self
                         .template_registry
                         .borrow()
@@ -989,16 +1028,11 @@ impl<'a> WAILParser<'a> {
                             },
                         ))
                     } else {
-                        // Treat as object instantiation
-                        let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
-                        Ok((
+                        // Neither a valid object type nor template
+                        Err(nom::Err::Error(ErrorTree::from_error_kind(
                             input,
-                            MainStatement::ObjectInstantiation {
-                                variable: var_name.to_string(),
-                                object_type: template_call.template_name,
-                                arguments: template_call.arguments,
-                            },
-                        ))
+                            nom::error::ErrorKind::Tag,
+                        )))
                     }
                 },
                 |input| {
