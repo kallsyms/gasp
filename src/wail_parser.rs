@@ -16,6 +16,7 @@ use nom::{
 use nom_supreme::final_parser::Location;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env::var;
 
 use nom_supreme::error::{BaseErrorKind, ErrorTree};
 
@@ -110,7 +111,7 @@ pub struct WAILParser<'a> {
     adhoc_obj_refs: RefCell<HashMap<String, WAILObject<'a>>>,
     main: RefCell<Option<WAILMainDef<'a>>>,
     // Track object instantiations with their variable names
-    object_instances: RefCell<HashMap<String, WAILObject<'a>>>,
+    object_instances: RefCell<HashMap<String, WAILObjectInstantiation>>,
 }
 
 impl<'a> WAILParser<'a> {
@@ -137,74 +138,25 @@ impl<'a> WAILParser<'a> {
         }
 
         // Find positions of `gasp` fence and JSON object in the input.
-        let gasp_pos = input.find("```gasp");
-        let json_pos = input.find('{');
+        let result_pos = input.find("<result>");
 
-        match (gasp_pos, json_pos) {
-            (Some(gp), Some(jp)) => {
-                // Both patterns are present, choose the one that comes first.
-                if gp < jp {
-                    self.parse_gasp_fence(input)
-                } else {
-                    self.parse_raw_json(input)
-                }
-            }
-            (Some(_), None) => self.parse_gasp_fence(input), // Only `gasp` fence is present.
-            (None, Some(_)) => self.parse_raw_json(input),   // Only JSON is present.
-            (None, None) => Err(nom::Err::Error(nom::error::Error::new(
+        match result_pos {
+            Some(_) => self.parse_result_block(input), // Only <result> block is present.
+            None => Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Tag,
             ))), // Neither pattern is found.
         }
     }
 
-    /// Parse a `gasp`-fenced block.
-    fn parse_gasp_fence(&'a self, input: &'a str) -> IResult<&'a str, String> {
-        let (input, _) = take_until("```gasp")(input)?;
-        let (input, content) = delimited(tag("```gasp"), take_until("```"), tag("```"))(input)?;
+    /// Parse a <result></result> fenced block.
+    fn parse_result_block(&'a self, input: &'a str) -> IResult<&'a str, String> {
+        let (input, _) = take_until("<result>")(input)?;
+        let (input, content) =
+            delimited(tag("<result>"), take_until("</result>"), tag("</result>"))(input)?;
 
         let content = content.trim();
         Ok((input, content.to_string()))
-    }
-
-    /// Parse raw JSON content.
-    fn parse_raw_json(&'a self, input: &'a str) -> IResult<&'a str, String> {
-        let mut depth = 0;
-        let mut json_chars = Vec::new();
-        let mut pos = 0;
-
-        let (input, _) = take_until("{")(input)?;
-
-        let mut chars = input.chars().peekable();
-        while let Some(&c) = chars.peek() {
-            match c {
-                '{' => {
-                    depth += 1;
-                    json_chars.push(c);
-                }
-                '}' => {
-                    depth -= 1;
-                    json_chars.push(c);
-                    if depth == 0 {
-                        pos += 1;
-                        break;
-                    }
-                }
-                _ => json_chars.push(c),
-            }
-            chars.next();
-            pos += 1;
-        }
-
-        if json_chars.is_empty() {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-
-        let json_str: String = json_chars.into_iter().collect();
-        Ok((&input[pos..], json_str))
     }
 
     pub fn parse_llm_output(&'a self, input: &'a str) -> Result<JsonValue, String> {
@@ -249,9 +201,10 @@ impl<'a> WAILParser<'a> {
 
     fn instantiate_object(
         &'a self,
+        name: &str,
         object_type: &str,
         args: HashMap<String, TemplateArgument>,
-    ) -> Result<WAILObject<'a>, String> {
+    ) -> Result<WAILObjectInstantiation, String> {
         // Get the object definition from registry
         let registry = self.registry.borrow();
         let field = registry
@@ -281,9 +234,10 @@ impl<'a> WAILParser<'a> {
                 }
             }
 
-            Ok(WAILObject {
-                value: field_map,
-                type_data: obj.type_data.clone(),
+            Ok(WAILObjectInstantiation {
+                binding_name: name.to_string(),
+                object_type: object_type.to_string(),
+                fields: args,
             })
         } else {
             Err(format!("{} is not an object type", object_type))
@@ -300,7 +254,7 @@ impl<'a> WAILParser<'a> {
         // Now proceed with prompt interpolation
         main.interpolate_prompt(
             &self.template_registry.borrow(),
-            &self.registry.borrow(),
+            &self.object_instances.borrow(),
             template_arg_values,
         )
         .unwrap()
@@ -905,34 +859,32 @@ impl<'a> WAILParser<'a> {
         }
 
         // Try to parse identifier first
-        let (input, value_str) = self.identifier(input)?;
+        let res = self.identifier(input);
+        if res.is_ok() {
+            let (input, value_str) = res.unwrap();
+            // Check if this is an object instance reference
+            if self.object_instances.borrow().contains_key(value_str) {
+                return Ok((
+                    input,
+                    (
+                        name.to_string(),
+                        TemplateArgument::ObjectRef(value_str.to_string()),
+                    ),
+                ));
+            }
 
-        println!("{:?}", self.object_instances.borrow());
-        println!("{:?}", self.registry.borrow().keys());
-        println!("{:?}", self.template_registry.borrow().keys());
-
-        // Check if this is an object instance reference
-        if self.object_instances.borrow().contains_key(value_str) {
-            return Ok((
-                input,
-                (
-                    name.to_string(),
-                    TemplateArgument::TemplateArgRef(value_str.to_string()),
-                ),
-            ));
-        }
-
-        // Check if this is an object type that exists in the registry
-        if self.registry.borrow().contains_key(value_str) {
-            if let Some(field) = self.registry.borrow().get(value_str) {
-                if let WAILType::Composite(WAILCompositeType::Object(_)) = &field.field_type {
-                    return Ok((
-                        input,
-                        (
-                            name.to_string(),
-                            TemplateArgument::TypeRef(value_str.to_string()),
-                        ),
-                    ));
+            // Check if this is an object type that exists in the registry
+            if self.registry.borrow().contains_key(value_str) {
+                if let Some(field) = self.registry.borrow().get(value_str) {
+                    if let WAILType::Composite(WAILCompositeType::Object(_)) = &field.field_type {
+                        return Ok((
+                            input,
+                            (
+                                name.to_string(),
+                                TemplateArgument::TypeRef(value_str.to_string()),
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -944,7 +896,7 @@ impl<'a> WAILParser<'a> {
             |i| self.parse_type_ref(i),
         ))(input)?;
 
-        Ok((input, (name.to_string(), value)))
+        return Ok((input, (name.to_string(), value)));
     }
 
     fn parse_main(
@@ -993,6 +945,7 @@ impl<'a> WAILParser<'a> {
                             let (input, _) = tuple((multispace0, char(';'), multispace0))(input)?;
                             let obj = self
                                 .instantiate_object(
+                                    &var_name,
                                     &template_call.template_name,
                                     template_call.arguments.clone(),
                                 )
@@ -1700,7 +1653,9 @@ Return in this format: {{return_type}}"#
             TemplateArgument::String("January 1st, 2024".to_string()),
         );
 
-        let final_prompt = template.interpolate_prompt(Some(&inputs)).unwrap();
+        let final_prompt = template
+            .interpolate_prompt(Some(&inputs), &parser.object_instances.borrow().clone())
+            .unwrap();
         println!("Final prompt:\n{}", final_prompt);
     }
 
@@ -1788,9 +1743,9 @@ Return in this format: {{return_type}}"#
 
                 // Test prompt interpolation
                 let template_registry = parser.template_registry.borrow().clone();
-                let registry = parser.registry.borrow().clone();
+                let objects = parser.object_instances.borrow().clone();
                 let interpolated = main
-                    .interpolate_prompt(&template_registry, &registry, None)
+                    .interpolate_prompt(&template_registry, &objects, None)
                     .unwrap();
 
                 println!("Interpolated prompt:\n{}", interpolated);
@@ -2031,16 +1986,12 @@ Return in this format: {{return_type}}"#
         let parser = WAILParser::new();
         parser.parse_wail_file(schema).unwrap();
 
-        // Test traditional object parsing
-        let traditional = r#"{"result": "hello"}"#;
-        assert!(parser.parse_llm_output(traditional).is_ok());
-
         // Test gasp fence parsing
         let gasp_fence = r#"
    Some text before
-   ```gasp
+   <result>
    "hello"
-   ```
+   </result>
    Some text after
    "#;
 
@@ -2062,13 +2013,13 @@ Return in this format: {{return_type}}"#
         // Test multiple gasp fences
         let multiple_fences = r#"
          First result:
-         ```gasp
+         <result>
          "hello"
-         ```
+         </result>
          Second result:
-         ```gasp
+         <result>
          "world"
-         ```
+         </result>
          "#;
 
         let res = parser.parse_llm_output(multiple_fences);
@@ -2077,13 +2028,18 @@ Return in this format: {{return_type}}"#
 
         // Test mixed traditional and fence
         let mixed = r#"
-         Traditional: {"result": "hello"}
          Fence:
-         ```gasp
+         <result>
          "world"
-         ```
+         </result>
+         <result>
+         "world"
+         </result>
+         dd
          "#;
-        assert!(parser.parse_llm_output(mixed).is_ok());
+        let res = parser.parse_llm_output(mixed);
+        println!("{:?}", res);
+        assert!(res.is_ok());
 
         // Test different types in fences
         let types_schema = r#"
@@ -2098,9 +2054,9 @@ Return in this format: {{return_type}}"#
         parser.parse_wail_file(types_schema).unwrap();
 
         let number_fence = r#"
-         ```gasp
-         42
-         ```
+        <result>
+         43
+        </result>
          "#;
 
         let res = parser.parse_llm_output(number_fence);
@@ -2119,9 +2075,9 @@ Return in this format: {{return_type}}"#
         parser.parse_wail_file(types_schema).unwrap();
 
         let array_fence = r#"
-         ```gasp
+         <result>
          [1, 2, 3]
-         ```
+         </result>
          "#;
         let res = parser.parse_llm_output(array_fence);
         println!("{:?}", res);
@@ -2214,7 +2170,9 @@ Return in this format: {{return_type}}"#
             ),
         ]);
 
-        parser.prepare_prompt(Some(&template_args));
+        let prompt = parser.prepare_prompt(Some(&template_args));
+
+        println!("Prompt:\n{}", prompt);
     }
 
     #[test]

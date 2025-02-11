@@ -432,17 +432,31 @@ mod tests {
             let parser = wail_parser::WAILParser::new();
             parser.parse_wail_file(schema).unwrap();
 
-            let valid_success = r#"{"result": {"message": "ok"}}"#;
-            assert!(parser.parse_llm_output(valid_success).is_ok());
-            assert!(parser.validate_json(valid_success).is_ok());
+            let valid_success = r#"
+            <result>
+            {"message": "ok"}
+            </result>
+            "#;
+            let res = parser.parse_llm_output(valid_success);
+            assert!(res.is_ok());
+            let val = res.unwrap();
 
-            let valid_error = r#"{"result": {"code": 404}}"#;
-            assert!(parser.parse_llm_output(valid_error).is_ok());
-            assert!(parser.validate_json(valid_error).is_ok());
+            let res2 = parser.validate_json(&val.to_string());
+            assert!(res2.is_ok());
 
-            let invalid = r#"{"result": {"code": "404"}}"#;
-            assert!(parser.parse_llm_output(invalid).is_ok());
-            assert!(parser.validate_json(invalid).is_err());
+            let valid_error = r#"<result>
+            {"code": 404}
+            </result>"#;
+            let res = parser.parse_llm_output(valid_error);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
+
+            let invalid = r#"<result>
+            {"code": "404"}
+            </result>"#;
+            let res = parser.parse_llm_output(invalid);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
         }
 
         // Test 2: Named union return
@@ -464,17 +478,20 @@ mod tests {
             let parser = wail_parser::WAILParser::new();
             parser.parse_wail_file(schema).unwrap();
 
-            let valid_success = r#"{"result": {"message": "ok"}}"#;
-            assert!(parser.parse_llm_output(valid_success).is_ok());
-            assert!(parser.validate_json(valid_success).is_ok());
+            let valid_success = r#"<result>{"message": "ok"}</result>"#;
+            let res = parser.parse_llm_output(valid_success);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
-            let valid_error = r#"{"result": {"code": 404}}"#;
-            assert!(parser.parse_llm_output(valid_error).is_ok());
-            assert!(parser.validate_json(valid_error).is_ok());
+            let valid_error = r#"<result>{"code": 404}</result>"#;
+            let res = parser.parse_llm_output(valid_error);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
-            let invalid = r#"{"result": {"code": "404"}}"#;
-            assert!(parser.parse_llm_output(invalid).is_ok());
-            assert!(parser.validate_json(invalid).is_err());
+            let invalid = r#"<result>{"code": "404"}</result>"#;
+            let res = parser.parse_llm_output(invalid);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
         }
 
         // Test 3: Array of named union return
@@ -496,19 +513,21 @@ mod tests {
             let parser = wail_parser::WAILParser::new();
             parser.parse_wail_file(schema).unwrap();
 
-            let valid = r#"{"result": [
+            let valid = r#"<result>[
                {"message": "ok"},
                {"code": 404}
-           ]}"#;
-            assert!(parser.parse_llm_output(valid).is_ok());
-            assert!(parser.validate_json(valid).is_ok());
+           ]</result>"#;
+            let res = parser.parse_llm_output(valid);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
-            let invalid = r#"{"result": [
+            let invalid = r#"<result>[
                {"message": "ok"},
                {"code": "404"}
-           ]}"#;
-            assert!(parser.parse_llm_output(invalid).is_ok());
-            assert!(parser.validate_json(invalid).is_err());
+           ]</result>"#;
+            let res = parser.parse_llm_output(invalid);
+            assert!(res.is_ok());
+            assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
         }
     }
 

@@ -33,6 +33,7 @@ pub enum TemplateArgument {
     Float(f64),
     TypeRef(String), // For when we reference a type like "String" or "Number"
     TemplateArgRef(String),
+    ObjectRef(String),
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,13 @@ pub struct WAILObjectDef<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct WAILObjectInstantiation {
+    pub binding_name: String,
+    pub object_type: String,
+    pub fields: HashMap<String, TemplateArgument>,
+}
+
+#[derive(Debug, Clone)]
 pub struct WAILTemplateDef<'a> {
     pub name: String,
     pub inputs: Vec<WAILField<'a>>,
@@ -94,6 +102,7 @@ impl TemplateArgument {
             TemplateArgument::Float(f) => f.to_string(),
             TemplateArgument::TypeRef(t) => t.clone(),
             TemplateArgument::TemplateArgRef(t) => format!("${}", t),
+            TemplateArgument::ObjectRef(o) => o.clone(),
         }
     }
 }
@@ -144,7 +153,7 @@ impl<'a> WAILMainDef<'a> {
     pub fn interpolate_prompt(
         &self,
         template_registry: &HashMap<String, WAILTemplateDef>,
-        registry: &HashMap<String, WAILField>,
+        object_instances: &HashMap<String, WAILObjectInstantiation>,
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> Result<String, String> {
         let mut result = self.prompt.clone();
@@ -174,7 +183,10 @@ impl<'a> WAILMainDef<'a> {
                             let template = template_registry.get(&template_call.template_name)?;
 
                             template
-                                .interpolate_prompt(Some(&template_call.arguments))
+                                .interpolate_prompt(
+                                    Some(&template_call.arguments),
+                                    &object_instances.clone(),
+                                )
                                 .ok()
                         }
                         MainStatement::ObjectInstantiation {
@@ -191,6 +203,7 @@ impl<'a> WAILMainDef<'a> {
                                     TemplateArgument::Float(f) => f.to_string(),
                                     TemplateArgument::TypeRef(t) => format!("\"{}\"", t),
                                     TemplateArgument::TemplateArgRef(t) => format!("\"${}\"", t),
+                                    TemplateArgument::ObjectRef(o) => format!("\"{}\"", o),
                                 };
                                 obj.insert(key.clone(), formatted_value);
                             }
@@ -205,8 +218,6 @@ impl<'a> WAILMainDef<'a> {
                         }
                         _ => None,
                     });
-
-                    println!("Replacement: {:?}", replacement);
 
                     let value = if let Some(template_result) = replacement {
                         template_result
@@ -572,6 +583,7 @@ impl<'a> WAILTemplateDef<'a> {
     pub fn interpolate_prompt(
         &self,
         arguments: Option<&HashMap<String, TemplateArgument>>,
+        object_instances: &HashMap<String, WAILObjectInstantiation>,
     ) -> Result<String, String> {
         let mut prompt = self.prompt_template.clone();
 
@@ -579,8 +591,9 @@ impl<'a> WAILTemplateDef<'a> {
 
         for input in &self.inputs {
             let placeholder = format!("{{{{{}}}}}", input.name);
-            println!("Placeholder: {}", placeholder);
-            if !prompt.contains(&placeholder) {
+            let object_ref_placeholder = format!("{{{{{}.", input.name);
+
+            if !prompt.contains(&placeholder) && !object_instances.contains_key(&input.name) {
                 return Err(format!("Missing placeholder for input: {}", input.name));
             }
 
@@ -589,8 +602,56 @@ impl<'a> WAILTemplateDef<'a> {
             if let Some(arguments) = arguments {
                 let argument = arguments.get(&input.name).unwrap();
 
-                println!("Argument: {:?}", argument);
-                prompt = prompt.replace(&placeholder, &argument.to_string());
+                match argument {
+                    TemplateArgument::String(s) => {
+                        prompt = prompt.replace(&placeholder, s);
+                    }
+                    TemplateArgument::Number(n) => {
+                        prompt = prompt.replace(&placeholder, &n.to_string());
+                    }
+                    TemplateArgument::Float(f) => {
+                        prompt = prompt.replace(&placeholder, &f.to_string());
+                    }
+                    TemplateArgument::TypeRef(t) => {
+                        prompt = prompt.replace(&placeholder, t);
+                    }
+                    TemplateArgument::TemplateArgRef(t) => {
+                        prompt = prompt.replace(&placeholder, &format!("${}", t));
+                    }
+                    TemplateArgument::ObjectRef(o) => {
+                        let object = object_instances
+                            .get(o)
+                            .ok_or_else(|| format!("Object not found: {}", o))?;
+
+                        // Replace the object reference placeholder with the object's fields
+                        for (name, field) in &object.fields {
+                            let field_placeholder = format!("{{{{{}.{}}}}}", o, name);
+
+                            match field {
+                                TemplateArgument::String(s) => {
+                                    prompt = prompt.replace(&field_placeholder, s);
+                                }
+                                TemplateArgument::Number(n) => {
+                                    prompt = prompt.replace(&field_placeholder, &n.to_string());
+                                }
+                                TemplateArgument::Float(f) => {
+                                    prompt = prompt.replace(&field_placeholder, &f.to_string());
+                                }
+                                TemplateArgument::TypeRef(t) => {
+                                    prompt = prompt.replace(&field_placeholder, t);
+                                }
+                                TemplateArgument::TemplateArgRef(t) => {
+                                    prompt = prompt.replace(&field_placeholder, &format!("${}", t));
+                                }
+                                TemplateArgument::ObjectRef(_) => {
+                                    return Err(
+                                        "Nested object references are not supported".to_string()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 let mut param_info = String::new();
 
@@ -678,8 +739,12 @@ impl<'a> WAILTemplateDef<'a> {
                     }
                 }
 
+                println!("Param info: {}", param_info);
+
                 prompt = prompt.replace(&placeholder, &param_info);
             }
+
+            println!("Prompt: {}", prompt);
         }
 
         // Handle return type with proper indentation
@@ -788,7 +853,7 @@ impl<'a> WAILTemplateDef<'a> {
                 .join("\n");
 
             let return_prompt = format!(
-                "\nAnswer in JSON using this schema:\n\n{}\nWrap your response in ```gasp fences.\n ANSWER:\n```gasp\n",
+                "\nAnswer using this schema:{}\nWrap your final result in <result> and </result> tags.",
                 indented_schema
             );
 
@@ -829,13 +894,13 @@ mod tests {
         // Test relaxed JSON parsing features
         let cases = vec![
             // Unquoted keys
-            r#"{"person": {name: "Alice", age: 25, interests: ["coding"]}}"#,
+            r#"<result>{"person": {name: "Alice", age: 25, interests: ["coding"]}}</result>"#,
             // Single quotes
-            r#"{'person': {'name': 'Alice', 'age': 25, 'interests': ['coding']}}"#,
+            r#"<result>{'person': {'name': 'Alice', 'age': 25, 'interests': ['coding']}}</result>"#,
             // Trailing commas
-            r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding",],}}"#,
+            r#"<result>{"person": {"name": "Alice", "age": 25, "interests": ["coding",],}}</result>"#,
             // Mixed quotes and unquoted identifiers
-            r#"{"person": {name: 'Alice', "age": 25, interests: ["coding"]}}"#,
+            r#"<result>{"person": {name: 'Alice', "age": 25, interests: ["coding"]}}</result>"#,
         ];
 
         for case in cases {
