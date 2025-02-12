@@ -324,13 +324,10 @@ impl<'a> WAILParser<'a> {
                             location: error_location(e, original_input),
                         }
                     }
-                    e => {
-                        println!("{:?}", e);
-                        WAILParseError::UnexpectedEOF {
-                            expected: "Unexpected Error".to_string(),
-                            location: error_location(e, original_input),
-                        }
-                    }
+                    e => WAILParseError::UnexpectedEOF {
+                        expected: "Unexpected Error".to_string(),
+                        location: error_location(e, original_input),
+                    },
                 })?
             } else {
                 break;
@@ -370,13 +367,10 @@ impl<'a> WAILParser<'a> {
                             location: error_location(e, original_input),
                         }
                     }
-                    e => {
-                        println!("{:?}", e);
-                        WAILParseError::UnexpectedEOF {
-                            expected: "Unexpected Error".to_string(),
-                            location: error_location(e, original_input),
-                        }
-                    }
+                    e => WAILParseError::UnexpectedEOF {
+                        expected: "Unexpected Error".to_string(),
+                        location: error_location(e, original_input),
+                    },
                 };
 
                 Err(err)
@@ -408,7 +402,7 @@ impl<'a> WAILParser<'a> {
         }
 
         let (input, _) = multispace0(input)?;
-        let (input, fields) = delimited(
+        let (input, mut fields) = delimited(
             char('{'),
             many1(delimited(multispace0, |i| self.parse_field(i), multispace0)),
             char('}'),
@@ -430,6 +424,41 @@ impl<'a> WAILParser<'a> {
                 field.field_type.clone(),
             );
         }
+
+        field_map.insert(
+            WAILString {
+                value: "_type".to_string(),
+                type_data: WAILTypeData {
+                    json_type: JsonValue::String("_type".to_string()),
+                    type_name: "String",
+                    field_definitions: None,
+                    element_type: None,
+                },
+            },
+            WAILType::Simple(WAILSimpleType::String(WAILString {
+                value: name.to_string(),
+                type_data: WAILTypeData {
+                    json_type: JsonValue::String("_type".to_string()),
+                    type_name: "String",
+                    field_definitions: None,
+                    element_type: None,
+                },
+            })),
+        );
+
+        fields.push(WAILField {
+            name: "_type".to_string(),
+            field_type: WAILType::Simple(WAILSimpleType::String(WAILString {
+                value: name.to_string(),
+                type_data: WAILTypeData {
+                    json_type: JsonValue::String("_type".to_string()),
+                    type_name: "String",
+                    field_definitions: None,
+                    element_type: None,
+                },
+            })),
+            annotations: vec![],
+        });
 
         let (input, annotations) = many0(|i| self.parse_annotation(i))(input)?;
 
@@ -474,7 +503,7 @@ impl<'a> WAILParser<'a> {
             WAILField {
                 name: name.to_string(),
                 field_type,
-                annotations: annotations, // For now, we'll add annotation parsing later
+                annotations: annotations,
             },
         ))
     }
@@ -1316,7 +1345,6 @@ impl<'a> WAILParser<'a> {
                         }
                     }
                 }
-                WAILCompositeType::Tool(_) => (), // Tool types are always valid
             },
             WAILType::Value(_) => (), // Literal values are always valid
         }
@@ -1398,7 +1426,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .len(),
-                    2
+                    3 // 2 for fields above and then implicity _type metadata field
                 );
             }
             _ => panic!("Expected object definition"),
@@ -1701,7 +1729,7 @@ Return in this format: {{return_type}}"#
                 assert_eq!(obj.name, "Person");
                 if let WAILType::Composite(WAILCompositeType::Object(obj)) = &obj.field_type {
                     let fields = obj.type_data.field_definitions.as_ref().unwrap();
-                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields.len(), 3); // 3 because objects have added _type fields
                     assert_eq!(fields[0].name, "name");
                     assert_eq!(fields[1].name, "age");
                 } else {
@@ -2254,7 +2282,7 @@ main {
         assert_eq!(realtime_event.name, "RealtimeEvent");
         if let WAILType::Composite(WAILCompositeType::Object(obj)) = &realtime_event.field_type {
             let fields = obj.type_data.field_definitions.as_ref().unwrap();
-            assert_eq!(fields.len(), 2); // type and response fields
+            assert_eq!(fields.len(), 3); // type and response fields + _type metadata
             assert_eq!(fields[0].name, "type");
             assert_eq!(fields[1].name, "response");
         } else {
@@ -2269,7 +2297,7 @@ main {
         assert_eq!(message.name, "Message");
         if let WAILType::Composite(WAILCompositeType::Object(obj)) = &message.field_type {
             let fields = obj.type_data.field_definitions.as_ref().unwrap();
-            assert_eq!(fields.len(), 2); // content and role fields
+            assert_eq!(fields.len(), 3); // content and role fields + implicit _type metadata
             assert_eq!(fields[0].name, "content");
             assert_eq!(fields[1].name, "role");
         } else {
@@ -2284,7 +2312,7 @@ main {
         assert_eq!(conversation.name, "Conversation");
         if let WAILType::Composite(WAILCompositeType::Object(obj)) = &conversation.field_type {
             let fields = obj.type_data.field_definitions.as_ref().unwrap();
-            assert_eq!(fields.len(), 4); // messages, model, temperature, max_tokens
+            assert_eq!(fields.len(), 5); // messages, model, temperature, max_tokens + implicit _type field
             assert_eq!(fields[0].name, "messages");
             assert_eq!(fields[1].name, "model");
             assert_eq!(fields[2].name, "temperature");

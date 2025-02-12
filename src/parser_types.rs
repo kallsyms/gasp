@@ -2,6 +2,7 @@ use crate::json_types::{JsonValue, Number};
 use crate::types::*;
 use regex;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::marker::PhantomData;
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,27 @@ pub enum WAILAnnotation {
         name: String,
         annotations: Vec<WAILAnnotation>,
     },
+}
+
+impl Display for WAILAnnotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WAILAnnotation::Description(desc) => write!(f, "Description: {}", desc),
+            WAILAnnotation::Example(ex) => write!(f, "Example: {}", ex),
+            WAILAnnotation::Validation(rule) => write!(f, "Validation: {}", rule),
+            WAILAnnotation::Format(fmt) => write!(f, "Format: {}", fmt),
+            WAILAnnotation::Important(note) => write!(f, "Important: {}", note),
+            WAILAnnotation::Context(ctx) => write!(f, "Context: {}", ctx),
+            WAILAnnotation::Default(def) => write!(f, "Default: {}", def),
+            WAILAnnotation::Field { name, annotations } => {
+                write!(f, "Field: {}\n", name)?;
+                for annotation in annotations {
+                    write!(f, "  {}\n", annotation)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +182,6 @@ impl<'a> WAILMainDef<'a> {
 
         use crate::template_parser::{parse_template, TemplateSegment};
 
-        println!("{:?}", self.statements);
         // Parse the template into nodes
         let nodes =
             parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
@@ -168,7 +189,6 @@ impl<'a> WAILMainDef<'a> {
         let mut output = String::new();
         let (_, segments) = nodes;
 
-        println!("Segments: {:?}", segments);
         for node in segments {
             match node {
                 TemplateSegment::Text(text) => output.push_str(&text),
@@ -179,7 +199,6 @@ impl<'a> WAILMainDef<'a> {
                             variable,
                             template_call,
                         } if variable == &var_name => {
-                            println!("HERE {:?}", var_name);
                             let template = template_registry.get(&template_call.template_name)?;
 
                             template
@@ -515,8 +534,6 @@ impl<'a> WAILMainDef<'a> {
                     };
 
                     let template_output = &template.output;
-                    println!("Validating: {:?}", template_output.field_type);
-                    println!("Value: {:?}", value);
                     template_output.field_type.validate_json(value)?;
                 }
                 MainStatement::Comment(_) => {}
@@ -591,13 +608,10 @@ impl<'a> WAILTemplateDef<'a> {
 
         for input in &self.inputs {
             let placeholder = format!("{{{{{}}}}}", input.name);
-            let object_ref_placeholder = format!("{{{{{}.", input.name);
 
             if !prompt.contains(&placeholder) && !object_instances.contains_key(&input.name) {
                 return Err(format!("Missing placeholder for input: {}", input.name));
             }
-
-            println!("Arguments: {:?}", arguments);
 
             if let Some(arguments) = arguments {
                 let argument = arguments.get(&input.name).unwrap();
@@ -675,6 +689,9 @@ impl<'a> WAILTemplateDef<'a> {
                 }
 
                 // Add general annotations
+                println!("General annotations: {:?}", general_annotations);
+                println!("Field annotations: {:?}", field_annotations);
+
                 if !general_annotations.is_empty() {
                     param_info.push_str("\n# General:\n");
                     for annotation in &general_annotations {
@@ -739,12 +756,8 @@ impl<'a> WAILTemplateDef<'a> {
                     }
                 }
 
-                println!("Param info: {}", param_info);
-
                 prompt = prompt.replace(&placeholder, &param_info);
             }
-
-            println!("Prompt: {}", prompt);
         }
 
         // Handle return type with proper indentation
@@ -853,7 +866,7 @@ impl<'a> WAILTemplateDef<'a> {
                 .join("\n");
 
             let return_prompt = format!(
-                "\nAnswer using this schema:{}\nWrap your final result in <result> and </result> tags.",
+                "\nAnswer using this schema:\n{}\nWrap your final result in <result> and </result> tags.",
                 indented_schema
             );
 

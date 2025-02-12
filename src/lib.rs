@@ -7,23 +7,12 @@ mod rd_json_stack_parser;
 mod template_parser;
 mod types;
 mod wail_parser;
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_until, take_while1},
-    character::complete::{alpha1, char, multispace0, multispace1},
-    combinator::opt,
-    multi::{many0, separated_list0},
-    sequence::{delimited, preceded, tuple},
-    IResult,
-};
 
 use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString};
 use pyo3::Python;
 use std::collections::HashMap;
 
 use crate::json_types::{JsonValue, Number};
-
-use rd_json_stack_parser::Parser as JsonParser;
 
 fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
     match value {
@@ -349,7 +338,9 @@ mod tests {
         parser.parse_wail_file(schema).unwrap();
 
         let valid = r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding"]}}"#;
-        assert!(parser.validate_json(valid).is_ok());
+        let res = parser.validate_json(valid);
+        println!("res {:?}", res);
+        assert!(res.is_ok());
 
         let invalid_types = r#"{"person": {"name": 42, "age": "25", "interests": "coding"}}"#;
         assert!(parser.validate_json(invalid_types).is_err());

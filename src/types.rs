@@ -1,4 +1,4 @@
-use crate::parser_types::WAILField;
+use crate::parser_types::{WAILAnnotation, WAILField};
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -26,7 +26,6 @@ pub enum WAILSimpleType<'a> {
 
 #[derive(Debug, Clone)]
 pub enum WAILCompositeType<'a> {
-    Tool(WAILTool<'a>),
     Object(WAILObject<'a>),
     Array(WAILArray<'a>),
     Union(WAILUnion<'a>),
@@ -51,30 +50,63 @@ pub enum WAILType<'a> {
     Value(WAILValue), // For literal values
 }
 
+pub fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
+pub fn format_annoations(annotations: Vec<WAILAnnotation>) -> String {
+    if annotations.is_empty() {
+        return String::new();
+    }
+    format!(
+        " # {}",
+        annotations
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<String>>()
+            .join("\n# ")
+    )
+}
+
 impl<'a> WAILType<'a> {
     pub fn to_schema(&self) -> String {
         match self {
             WAILType::Simple(simple) => match simple {
-                WAILSimpleType::String(_) => "string".to_string(),
+                WAILSimpleType::String(x) => {
+                    if let JsonValue::String(val) = self.type_data().json_type.clone() {
+                        if val == "_type" {
+                            x.value.to_string()
+                        } else {
+                            "string".to_string()
+                        }
+                    } else {
+                        "string".to_string()
+                    }
+                }
                 WAILSimpleType::Number(_) => "number".to_string(),
             },
             WAILType::Composite(composite) => match composite {
-                WAILCompositeType::Tool(_) => "object".to_string(),
                 WAILCompositeType::Object(obj) => {
                     let mut schema = String::from("\n{\n");
                     if let Some(fields) = &obj.type_data.field_definitions {
                         for field in fields {
                             if field.field_type.element_type().is_some() {
                                 schema.push_str(&format!(
-                                    "  {}: {}[]\n",
+                                    "  {}: {}[]{}\n",
                                     field.name,
-                                    field.field_type.element_type().unwrap().to_schema()
+                                    field.field_type.element_type().unwrap().to_schema(),
+                                    format_annoations(field.annotations.clone())
                                 ));
                             } else {
                                 schema.push_str(&format!(
-                                    "  {}: {}\n",
+                                    "  {}: {}{}\n",
                                     field.name,
-                                    field.field_type.to_schema()
+                                    capitalize(&field.field_type.to_schema()),
+                                    format_annoations(field.annotations.clone())
                                 ));
                             }
                         }
@@ -84,7 +116,7 @@ impl<'a> WAILType<'a> {
                 }
                 WAILCompositeType::Array(arr) => {
                     format!(
-                        "array<{}>",
+                        "{}[]",
                         arr.type_data.element_type.as_ref().unwrap().to_schema()
                     )
                 }
@@ -146,7 +178,6 @@ impl<'a> WAILType<'a> {
                 },
             },
             WAILType::Composite(composite) => match composite {
-                WAILCompositeType::Tool(t) => &t.type_data,
                 WAILCompositeType::Object(o) => &o.type_data,
                 WAILCompositeType::Array(a) => &a.type_data,
                 WAILCompositeType::Union(u) => &u.type_data,
@@ -171,7 +202,11 @@ impl<'a> WAILType<'a> {
                             .field_type
                             .validate_json(value)
                             .map_err(|e| format!("Field '{}': {}", field.name, e))?,
-                        None => return Err(format!("Missing required field: {}", field.name)),
+                        None => {
+                            if field.name != "_type" {
+                                return Err(format!("Missing required field: {}", field.name));
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -232,14 +267,6 @@ impl<'a> WAILType<'a> {
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct WAILTool<'a> {
-    pub name: WAILString<'a>,
-    pub parameters: HashMap<WAILString<'a>, WAILType<'a>>,
-    pub type_data: WAILTypeData<'a>,
-}
-
 #[derive(Debug, Clone)]
 pub struct WAILTypeData<'a> {
     pub json_type: JsonValue,
@@ -371,64 +398,28 @@ impl<'a> TryFrom<JsonValue> for WAILObject<'a> {
                     let wail_value = WAILType::try_from(v)?;
                     wail_map.insert(wail_key, wail_value);
                 }
+
+                let field_defs = map
+                    .clone()
+                    .iter()
+                    .map(|(k, v)| WAILField {
+                        name: k.to_string(),
+                        field_type: WAILType::try_from(v.clone()).unwrap(),
+                        annotations: Vec::new(),
+                    })
+                    .collect::<Vec<WAILField>>();
+
                 Ok(WAILObject {
                     value: wail_map,
                     type_data: WAILTypeData {
                         json_type: value,
                         type_name: OBJECT_TYPE,
-                        field_definitions: Some(
-                            map.clone()
-                                .iter()
-                                .map(|(k, v)| WAILField {
-                                    name: k.to_string(),
-                                    field_type: WAILType::try_from(v.clone()).unwrap(),
-                                    annotations: Vec::new(),
-                                })
-                                .collect(),
-                        ),
+                        field_definitions: Some(field_defs),
                         element_type: None,
                     },
                 })
             }
             _ => Err("Expected Object JsonValue".to_string()),
-        }
-    }
-}
-
-// For WAILTool
-impl<'a> TryFrom<JsonValue> for WAILTool<'a> {
-    type Error = String;
-
-    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
-        match value.clone() {
-            JsonValue::Object(mut map) => {
-                let name = map.remove("name").ok_or("Missing name field")?.try_into()?;
-
-                let parameters = map.remove("parameters").ok_or("Missing parameters field")?;
-
-                match parameters {
-                    JsonValue::Object(param_map) => {
-                        let mut wail_params = HashMap::new();
-                        for (k, v) in param_map {
-                            let wail_key = WAILString::try_from(JsonValue::String(k))?;
-                            let wail_value = WAILType::try_from(v)?;
-                            wail_params.insert(wail_key, wail_value);
-                        }
-                        Ok(WAILTool {
-                            name,
-                            parameters: wail_params,
-                            type_data: WAILTypeData {
-                                json_type: value.clone(),
-                                type_name: TOOL_TYPE,
-                                field_definitions: None,
-                                element_type: None,
-                            },
-                        })
-                    }
-                    _ => Err("Parameters must be an object".to_string()),
-                }
-            }
-            _ => Err("Expected Object JsonValue for Tool".to_string()),
         }
     }
 }
@@ -440,17 +431,9 @@ impl<'a> TryFrom<JsonValue> for WAILType<'a> {
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
         match value {
             JsonValue::String(_) | JsonValue::Number(_) => Ok(WAILType::Simple(value.try_into()?)),
-            JsonValue::Object(ref map) => {
-                if map.contains_key("name") && map.contains_key("parameters") {
-                    Ok(WAILType::Composite(WAILCompositeType::Tool(
-                        value.try_into()?,
-                    )))
-                } else {
-                    Ok(WAILType::Composite(WAILCompositeType::Object(
-                        value.try_into()?,
-                    )))
-                }
-            }
+            JsonValue::Object(ref map) => Ok(WAILType::Composite(WAILCompositeType::Object(
+                value.try_into()?,
+            ))),
             _ => Err("Unsupported JsonValue type".to_string()),
         }
     }
@@ -468,17 +451,6 @@ impl<'a> From<WAILType<'a>> for JsonValue {
                 },
             },
             WAILType::Composite(composite) => match composite {
-                WAILCompositeType::Tool(f) => {
-                    let mut map = HashMap::new();
-                    map.insert("name".to_string(), JsonValue::String(f.name.value));
-                    let params_map: HashMap<String, JsonValue> = f
-                        .parameters
-                        .into_iter()
-                        .map(|(k, v)| (k.value, v.into()))
-                        .collect();
-                    map.insert("parameters".to_string(), JsonValue::Object(params_map));
-                    JsonValue::Object(map)
-                }
                 WAILCompositeType::Object(o) => {
                     let map: HashMap<String, JsonValue> = o
                         .value
@@ -547,28 +519,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wail_function() {
-        let mut params = HashMap::new();
-        params.insert(
-            "param1".to_string(),
-            JsonValue::String("value1".to_string()),
-        );
-
-        let mut func_map = HashMap::new();
-        func_map.insert("name".to_string(), JsonValue::String("myFunc".to_string()));
-        func_map.insert("parameters".to_string(), JsonValue::Object(params));
-
-        let json = JsonValue::Object(func_map);
-
-        let wail: WAILTool = json.clone().try_into().unwrap();
-        assert_eq!(wail.name.value, "myFunc");
-        assert_eq!(wail.parameters.len(), 1);
-
-        let back: JsonValue = WAILType::Composite(WAILCompositeType::Tool(wail)).into();
-        assert!(matches!(back, JsonValue::Object(m) if m.len() == 2));
-    }
-
-    #[test]
     fn test_invalid_conversions() {
         // Test string expected, got number
         let result: Result<WAILString, _> = JsonValue::Number(Number::Integer(42)).try_into();
@@ -577,11 +527,6 @@ mod tests {
         // Test number expected, got string
         let result: Result<WAILNumber, _> =
             JsonValue::String("not a number".to_string()).try_into();
-        assert!(result.is_err());
-
-        // Test function missing required fields
-        let empty_map = HashMap::new();
-        let result: Result<WAILTool, _> = JsonValue::Object(empty_map).try_into();
         assert!(result.is_err());
     }
 
