@@ -879,7 +879,7 @@ impl<'a> WAILTemplateDef<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::wail_parser::WAILParser;
+    use crate::wail_parser::{WAILFileType, WAILParser};
 
     #[test]
     fn test_parse_llm_output() {
@@ -901,8 +901,11 @@ mod tests {
         }
     }"#;
 
-        let parser = WAILParser::new();
-        parser.parse_wail_file(wail_schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(wail_schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         // Test relaxed JSON parsing features
         let cases = vec![

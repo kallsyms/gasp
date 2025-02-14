@@ -116,7 +116,7 @@ impl<'a> WAILType<'a> {
                 }
                 WAILCompositeType::Array(arr) => {
                     format!(
-                        "{}[]",
+                        "An array of: {}",
                         arr.type_data.element_type.as_ref().unwrap().to_schema()
                     )
                 }

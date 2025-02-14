@@ -17,6 +17,8 @@ use nom_supreme::final_parser::Location;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env::var;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use nom_supreme::error::{BaseErrorKind, ErrorTree};
 
@@ -65,7 +67,37 @@ pub enum WAILParseError {
         reason: String,
         location: Location,
     },
+    CircularImport {
+        path: String,
+        chain: Vec<String>,
+    },
+    InvalidImportPath {
+        path: String,
+        error: String,
+    },
+    FileError {
+        path: String,
+        error: String,
+    },
+    ImportNotFound {
+        name: String,
+        path: String,
+    },
 }
+
+impl std::fmt::Display for WAILParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WAILParseError::CircularImport { path, chain } => {
+                write!(f, "Circular import detected: {} in chain {:?}", path, chain)
+            }
+            // ... handle other variants ...
+            _ => write!(f, "{:?}", self),
+        }
+    }
+}
+
+impl std::error::Error for WAILParseError {}
 
 fn count_leading_whitespace(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
@@ -112,10 +144,235 @@ pub struct WAILParser<'a> {
     main: RefCell<Option<WAILMainDef<'a>>>,
     // Track object instantiations with their variable names
     object_instances: RefCell<HashMap<String, WAILObjectInstantiation>>,
+    import_chain: RefCell<ImportChain>,
+    base_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct ImportChain {
+    // Track the chain of imports to detect cycles
+    chain: Vec<String>,
+    // Current working directory for resolving relative paths
+    base_path: PathBuf,
+}
+
+impl ImportChain {
+    fn new(base_path: PathBuf) -> Self {
+        Self {
+            chain: Vec::new(),
+            base_path,
+        }
+    }
+
+    fn push(&mut self, path: &str) -> Result<(), WAILParseError> {
+        let canonical_path = self.resolve_path(path)?;
+
+        if self.chain.contains(&canonical_path) {
+            return Err(WAILParseError::CircularImport {
+                path: canonical_path,
+                chain: self.chain.clone(),
+            });
+        }
+
+        self.chain.push(canonical_path);
+        Ok(())
+    }
+
+    fn pop(&mut self) {
+        self.chain.pop();
+    }
+
+    fn resolve_path(&self, path: &str) -> Result<String, WAILParseError> {
+        let path = PathBuf::from(path);
+
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            self.base_path.join(path)
+        };
+
+        // Clean up the path without checking file existence
+        let cleaned = resolved
+            .components()
+            .fold(PathBuf::new(), |mut cleaned, component| {
+                match component {
+                    std::path::Component::ParentDir => {
+                        cleaned.pop(); // Remove last component for ..
+                    }
+                    std::path::Component::Normal(part) => {
+                        cleaned.push(part);
+                    }
+                    std::path::Component::RootDir => {
+                        cleaned.push("/");
+                    }
+                    _ => {} // Skip . and prefix components
+                }
+                cleaned
+            });
+
+        Ok(cleaned.to_string_lossy().to_string())
+    }
+}
+
+#[derive(Debug)]
+pub enum WAILFileType {
+    Library,     // .lib.wail - only definitions allowed
+    Application, // .wail - requires main block
+}
+
+#[derive(Debug, Clone)]
+pub struct WAILImport {
+    pub items: Vec<String>,
+    pub path: String,
 }
 
 impl<'a> WAILParser<'a> {
-    pub fn new() -> Self {
+    fn detect_file_type(path: &'a str) -> WAILFileType {
+        if path.ends_with(".lib.wail") {
+            WAILFileType::Library
+        } else {
+            WAILFileType::Application
+        }
+    }
+
+    fn resolve_imports(
+        &'a self,
+        definitions: &Vec<WAILDefinition<'a>>,
+    ) -> Result<(), WAILParseError> {
+        let mut all_imported_defs = vec![];
+
+        for def in definitions {
+            if let WAILDefinition::Import(import) = def {
+                // Clean up import pollution since we use the same parser
+                self.object_instances.borrow_mut().clear();
+                self.registry.borrow_mut().clear();
+                self.template_registry.borrow_mut().clear();
+                // Load and parse the library file
+                let file_path = self.import_chain.borrow().resolve_path(&import.path)?;
+
+                let lib_content =
+                    std::fs::read_to_string(&file_path).map_err(|e| WAILParseError::FileError {
+                        path: import.path.clone(),
+                        error: e.to_string(),
+                    })?;
+
+                let file_type = WAILFileType::Library;
+
+                // Parse the library file
+                let lib_defs = self.parse_wail_file(lib_content, file_type, false)?;
+
+                // Extract requested definitions
+                for item_name in &import.items {
+                    let mut found = false;
+                    for lib_def in &lib_defs {
+                        match lib_def {
+                            WAILDefinition::Object(field) if &field.name == item_name => {
+                                found = true;
+                                all_imported_defs.push(lib_def.clone());
+                                break;
+                            }
+                            WAILDefinition::Template(template) if &template.name == item_name => {
+                                found = true;
+                                all_imported_defs.push(lib_def.clone());
+                                break;
+                            }
+                            WAILDefinition::Union(field) if &field.name == item_name => {
+                                found = true;
+                                all_imported_defs.push(lib_def.clone());
+                                break;
+                            }
+                            _ => continue,
+                        }
+                    }
+                    if !found {
+                        return Err(WAILParseError::ImportNotFound {
+                            name: item_name.clone(),
+                            path: import.path.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        // One final clean up of import pollution since we use the same parser
+        self.object_instances.borrow_mut().clear();
+        self.registry.borrow_mut().clear();
+        self.template_registry.borrow_mut().clear();
+
+        // Finally insert defs that were selected
+        // This has to happen in two parts so we accumulate all defs first otherwise clearing would clobber.
+        for def in all_imported_defs {
+            match def {
+                WAILDefinition::Object(field) => {
+                    self.registry
+                        .borrow_mut()
+                        .insert(field.name.clone(), field.clone());
+                }
+                WAILDefinition::Template(template) => {
+                    self.template_registry
+                        .borrow_mut()
+                        .insert(template.name.clone(), template.clone());
+                }
+                WAILDefinition::Union(field) => {
+                    self.registry
+                        .borrow_mut()
+                        .insert(field.name.clone(), field.clone());
+                }
+                _ => continue,
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_import(
+        &'a self,
+        input: &'a str,
+    ) -> IResult<&'a str, WAILDefinition<'a>, ErrorTree<&'a str>> {
+        let (input, _) = tuple((tag("import"), multispace1))(input)?;
+
+        let (input, items) = delimited(
+            tuple((char('{'), multispace0)),
+            separated_list0(tuple((multispace0, char(','), multispace0)), |f| {
+                self.identifier(f)
+            }),
+            tuple((multispace0, char('}'))),
+        )(input)?;
+
+        let (input, _) = tuple((multispace0, tag("from"), multispace0))(input)?;
+        let (input, path) = delimited(char('"'), take_until("\""), char('"'))(input)?;
+
+        if let Err(e) = self.import_chain.borrow_mut().push(path) {
+            match e {
+                WAILParseError::CircularImport { path, chain } => {
+                    // Propagate circular import error directly
+                    return Err(nom::Err::Failure(ErrorTree::Stack {
+                        base: Box::new(ErrorTree::Base {
+                            location: input,
+                            kind: BaseErrorKind::External(Box::new(
+                                WAILParseError::CircularImport { path, chain },
+                            )),
+                        }),
+                        contexts: vec![],
+                    }));
+                }
+                _ => {
+                    return Err(nom::Err::Failure(ErrorTree::from_error_kind(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+            }
+        }
+
+        Ok((
+            input,
+            WAILDefinition::Import(WAILImport {
+                items: items.iter().map(|s| s.to_string()).collect(),
+                path: path.to_string(),
+            }),
+        ))
+    }
+
+    pub fn new(base_path: PathBuf) -> Self {
         Self {
             registry: RefCell::new(HashMap::new()),
             template_registry: RefCell::new(HashMap::new()),
@@ -124,6 +381,8 @@ impl<'a> WAILParser<'a> {
             adhoc_obj_ids: RefCell::new(Vec::new()),
             main: RefCell::new(None),
             object_instances: RefCell::new(HashMap::new()),
+            import_chain: RefCell::new(ImportChain::new(base_path.clone())),
+            base_path: base_path.clone(),
         }
     }
 
@@ -262,11 +521,17 @@ impl<'a> WAILParser<'a> {
 
     pub fn parse_wail_file(
         &'a self,
-        input: &'a str,
+        input_string: String,
+        file_type: WAILFileType,
+        clear: bool,
     ) -> Result<Vec<WAILDefinition<'a>>, WAILParseError> {
-        self.registry.borrow_mut().clear();
-        self.template_registry.borrow_mut().clear();
-        self.main.borrow_mut().take();
+        let input: &str = Box::leak(Box::new(input_string)); // Yes I hate that I leak this, no I'm not redesigning things for the lifetimes to line up
+
+        if clear {
+            self.registry.borrow_mut().clear();
+            self.template_registry.borrow_mut().clear();
+            self.main.borrow_mut().take();
+        }
 
         let original_input = input;
 
@@ -280,6 +545,64 @@ impl<'a> WAILParser<'a> {
         let mut definitions: Vec<WAILDefinition<'a>> = vec![];
 
         let mut input = input;
+
+        while !input.is_empty() && input.starts_with("import") {
+            let (new_input, import) = self.parse_import(input).map_err(|e| {
+                let emsg = e.to_string();
+                match e {
+                    nom::Err::Failure(ErrorTree::Stack { ref base, .. }) => {
+                        if let ErrorTree::Base {
+                            kind: BaseErrorKind::External(ref err),
+                            ..
+                        } = **base
+                        {
+                            if let Some(circular_err) = err.downcast_ref::<WAILParseError>() {
+                                match circular_err {
+                                    WAILParseError::CircularImport { path, chain } => {
+                                        WAILParseError::CircularImport {
+                                            path: path.clone(),
+                                            chain: chain.clone(),
+                                        }
+                                    }
+                                    _ => WAILParseError::UnexpectedToken {
+                                        found: emsg.to_string(),
+                                        location: error_location(e, original_input),
+                                    },
+                                }
+                            } else {
+                                WAILParseError::UnexpectedToken {
+                                    found: e.to_string(),
+                                    location: error_location(e, original_input),
+                                }
+                            }
+                        } else {
+                            WAILParseError::UnexpectedToken {
+                                found: e.to_string(),
+                                location: error_location(e, original_input),
+                            }
+                        }
+                    }
+                    _ => WAILParseError::UnexpectedToken {
+                        found: e.to_string(),
+                        location: error_location(e, original_input),
+                    },
+                }
+            })?;
+
+            input = new_input;
+            definitions.push(import);
+
+            let (new_input, _) =
+                multispace0(input).map_err(|e: nom::Err<ErrorTree<&'a str>>| {
+                    WAILParseError::UnexpectedToken {
+                        found: "invalid whitespace".to_string(),
+                        location: error_location(e, original_input),
+                    }
+                })?;
+            input = new_input;
+        }
+
+        self.resolve_imports(&definitions)?;
 
         loop {
             let (new_input, _) =
@@ -338,42 +661,48 @@ impl<'a> WAILParser<'a> {
             definitions.push(definition);
         }
 
-        if input.len() < 4 || &input[0..4] != "main" {
-            return Err(WAILParseError::MissingMainBlock);
-        }
-        // Parse required main block at the end
+        match file_type {
+            WAILFileType::Library => Ok(definitions),
+            WAILFileType::Application => {
+                if input.len() < 4 || &input[0..4] != "main" {
+                    return Err(WAILParseError::MissingMainBlock);
+                }
 
-        match self.parse_main(input) {
-            Ok((_, main_def)) => {
-                definitions.push(WAILDefinition::Main(main_def));
-                Ok(definitions)
-            }
-            Err(e) => {
-                let err = match e {
-                    nom::Err::Failure(ErrorTree::Base {
-                        location: _,
-                        kind: BaseErrorKind::Kind(nom::error::ErrorKind::Verify),
-                    }) => WAILParseError::DuplicateDefinition {
-                        name: input
-                            .split_whitespace()
-                            .nth(1)
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        location: error_location(e, original_input),
-                    },
-                    nom::Err::Error(ErrorTree::Base { location, .. }) => {
-                        WAILParseError::UnexpectedToken {
-                            found: location.lines().next().unwrap_or("unknown").to_string(),
-                            location: error_location(e, original_input),
-                        }
+                // Parse required main block at the end
+                match self.parse_main(input) {
+                    Ok((_, main_def)) => {
+                        definitions.push(WAILDefinition::Main(main_def));
+
+                        Ok(definitions)
                     }
-                    e => WAILParseError::UnexpectedEOF {
-                        expected: "Unexpected Error".to_string(),
-                        location: error_location(e, original_input),
-                    },
-                };
+                    Err(e) => {
+                        let err = match e {
+                            nom::Err::Failure(ErrorTree::Base {
+                                location: _,
+                                kind: BaseErrorKind::Kind(nom::error::ErrorKind::Verify),
+                            }) => WAILParseError::DuplicateDefinition {
+                                name: input
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                location: error_location(e, original_input),
+                            },
+                            nom::Err::Error(ErrorTree::Base { location, .. }) => {
+                                WAILParseError::UnexpectedToken {
+                                    found: location.lines().next().unwrap_or("unknown").to_string(),
+                                    location: error_location(e, original_input),
+                                }
+                            }
+                            e => WAILParseError::UnexpectedEOF {
+                                expected: "Unexpected Error".to_string(),
+                                location: error_location(e, original_input),
+                            },
+                        };
 
-                Err(err)
+                        Err(err)
+                    }
+                }
             }
         }
     }
@@ -945,7 +1274,6 @@ impl<'a> WAILParser<'a> {
         let (input, template_args) = opt(|input| {
             let (input, _) =
                 tuple((tag("template_args"), multispace0, char('{'), multispace0))(input)?;
-            // println!("{:?}", input);
             let (input, args) =
                 separated_list0(tuple((multispace0, char(','), multispace0)), |i| {
                     self.parse_template_arg(i)
@@ -1358,6 +1686,7 @@ pub enum WAILDefinition<'a> {
     Union(WAILField<'a>),
     Main(WAILMainDef<'a>),
     Comment(String),
+    Import(WAILImport),
 }
 
 impl<'a> WAILDefinition<'a> {
@@ -1412,7 +1741,8 @@ mod tests {
             age: Number
       }"#;
 
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         let (_, object_def) = parser.parse_object(input).unwrap();
 
@@ -1436,7 +1766,8 @@ mod tests {
     #[test]
     fn test_parse_template() {
         // First create a parser
-        let mut parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let mut parser = WAILParser::new(test_dir);
 
         // Create and register the DateInfo type
         let date_info_fields = vec![
@@ -1549,7 +1880,8 @@ mod tests {
       """
    }"#;
 
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         let (_, template_def) = parser.parse_template(input).unwrap();
 
@@ -1598,7 +1930,8 @@ mod tests {
 
     #[test]
     fn test_prompt_interpolation() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         // Define DateInfo type
         let fields = vec![
@@ -1689,7 +2022,8 @@ Return in this format: {{return_type}}"#
 
     #[test]
     fn test_wail_parsing() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         let input = r#"
       object Person {
@@ -1716,7 +2050,9 @@ Return in this format: {{return_type}}"#
       }
       "#;
 
-        let definitions = parser.parse_wail_file(input).unwrap();
+        let definitions = parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap();
         assert_eq!(
             definitions.len(),
             3,
@@ -1787,6 +2123,40 @@ Return in this format: {{return_type}}"#
     }
 
     #[test]
+    fn test_circular_imports() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        // Create a.lib.wail that imports from b
+        fs::write(
+            tmp.path().join("a.lib.wail"),
+            r#"import { B } from "b.lib.wail"
+        object A { field: String }"#,
+        )
+        .unwrap();
+
+        // Create b.lib.wail that imports from a
+        fs::write(
+            tmp.path().join("b.lib.wail"),
+            r#"import { A } from "a.lib.wail"
+        object B { field: String }"#,
+        )
+        .unwrap();
+
+        let parser = WAILParser::new(tmp.path().to_path_buf());
+
+        // Try to parse a file that starts the circular chain
+        let input = r#"import { A } from "a.lib.wail"
+    main { prompt { } }"#;
+
+        let result = parser.parse_wail_file(input.to_string(), WAILFileType::Application, true);
+        println!("{:?}", result);
+        assert!(matches!(result, Err(WAILParseError::CircularImport { .. })));
+    }
+
+    #[test]
     fn test_union_types() {
         let input = r#"
    object ErrorResult {
@@ -1834,8 +2204,9 @@ Return in this format: {{return_type}}"#
    }
    "#;
 
-        let parser = WAILParser::new();
-        let result = parser.parse_wail_file(input);
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+        let result = parser.parse_wail_file(input.to_string(), WAILFileType::Application, true);
         assert!(result.is_ok());
 
         let prompt = parser.prepare_prompt(None);
@@ -1861,7 +2232,8 @@ Return in this format: {{return_type}}"#
 
     #[test]
     fn test_validation() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         // First parse a template with undefined types
         let input = r#"template ProcessData(
@@ -1954,8 +2326,11 @@ Return in this format: {{return_type}}"#
    }
    "#;
 
-        let parser = WAILParser::new();
-        parser.parse_wail_file(input).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         // Create test template args
         let mut obj = HashMap::new();
@@ -2011,8 +2386,11 @@ Return in this format: {{return_type}}"#
       prompt { {{result}} }
    }"#;
 
-        let parser = WAILParser::new();
-        parser.parse_wail_file(schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         // Test gasp fence parsing
         let gasp_fence = r#"
@@ -2036,8 +2414,11 @@ Return in this format: {{return_type}}"#
       prompt { {{result}} {{result2}} }
    }"#;
 
-        let parser = WAILParser::new();
-        parser.parse_wail_file(schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
         // Test multiple gasp fences
         let multiple_fences = r#"
          First result:
@@ -2079,7 +2460,9 @@ Return in this format: {{return_type}}"#
                prompt { {{result}} }
          }"#;
 
-        parser.parse_wail_file(types_schema).unwrap();
+        parser
+            .parse_wail_file(types_schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         let number_fence = r#"
         <result>
@@ -2100,7 +2483,9 @@ Return in this format: {{return_type}}"#
                prompt { {{result}} }
          }"#;
 
-        parser.parse_wail_file(types_schema).unwrap();
+        parser
+            .parse_wail_file(types_schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         let array_fence = r#"
          <result>
@@ -2117,7 +2502,8 @@ Return in this format: {{return_type}}"#
 
     #[test]
     fn test_parse_object_as_argument_to_func() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
         let input = r#"
         object Article {
             content: String
@@ -2180,7 +2566,7 @@ Return in this format: {{return_type}}"#
             }
         }
         "#;
-        let result = parser.parse_wail_file(input);
+        let result = parser.parse_wail_file(input.to_string(), WAILFileType::Application, true);
         assert!(
             result.is_ok(),
             "Failed to parse ideal.wail: {:?}",
@@ -2205,7 +2591,8 @@ Return in this format: {{return_type}}"#
 
     #[test]
     fn test_parse_ideal_wail() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
         let input = r#"object RealtimeEvent {
    type: String  # response.create, response.chunk, response.end
    response: {
@@ -2265,7 +2652,7 @@ main {
    }
 }"#;
 
-        let result = parser.parse_wail_file(input);
+        let result = parser.parse_wail_file(input.to_string(), WAILFileType::Application, true);
         assert!(
             result.is_ok(),
             "Failed to parse ideal.wail: {:?}",
@@ -2365,8 +2752,77 @@ main {
     }
 
     #[test]
+    fn test_parse_imports() {
+        let input = r#"
+    import { Person, Address } from "types.lib.wail"
+    import { GetPerson } from "templates.lib.wail"
+
+    object Config {
+        name: String
+    }
+
+    main {
+        prompt { }
+    }
+    "#;
+
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        // Create a.lib.wail that imports from b
+        fs::write(
+            tmp.path().join("types.lib.wail"),
+            r#"
+            object Person {
+                name: String
+            }
+            object Address {
+                street: String
+            }
+        "#,
+        )
+        .unwrap();
+
+        fs::write(
+            tmp.path().join("templates.lib.wail"),
+            r#"
+            template GetPerson(name: String) -> String {
+                prompt: """
+                {{return_type}}
+                """
+            }"#,
+        )
+        .unwrap();
+
+        let parser = WAILParser::new(tmp.path().to_path_buf());
+        let definitions = parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap();
+
+        // First two definitions should be imports
+        match &definitions[0] {
+            WAILDefinition::Import(import) => {
+                assert_eq!(import.items, vec!["Person", "Address"]);
+                assert_eq!(import.path, "types.lib.wail");
+            }
+            _ => panic!("Expected first definition to be import"),
+        }
+
+        match &definitions[1] {
+            WAILDefinition::Import(import) => {
+                assert_eq!(import.items, vec!["GetPerson"]);
+                assert_eq!(import.path, "templates.lib.wail");
+            }
+            _ => panic!("Expected second definition to be import"),
+        }
+    }
+
+    #[test]
     fn test_wail_errors() {
-        let parser = WAILParser::new();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
 
         // Test duplicate object definition
         let input = r#"
@@ -2381,7 +2837,9 @@ main {
       }
       "#;
 
-        let err = parser.parse_wail_file(input).unwrap_err();
+        let err = parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap_err();
         assert!(
             matches!(err, WAILParseError::DuplicateDefinition { name, .. } if name == "Person")
         );
@@ -2393,7 +2851,9 @@ main {
       }
       "#;
 
-        let err = parser.parse_wail_file(input).unwrap_err();
+        let err = parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap_err();
         assert!(matches!(err, WAILParseError::MissingMainBlock));
 
         // Test unexpected token
@@ -2407,7 +2867,9 @@ main {
       }
       "#;
 
-        let err = parser.parse_wail_file(input).unwrap_err();
+        let err = parser
+            .parse_wail_file(input.to_string(), WAILFileType::Application, true)
+            .unwrap_err();
 
         assert!(
             matches!(err, WAILParseError::UnexpectedToken { found, .. } if found == "age: @ Number")

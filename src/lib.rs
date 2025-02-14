@@ -11,6 +11,8 @@ mod wail_parser;
 use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString};
 use pyo3::Python;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use wail_parser::WAILFileType;
 
 use crate::json_types::{JsonValue, Number};
 
@@ -45,14 +47,22 @@ fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
 #[derive(Debug)]
 struct WAILGenerator {
     wail_content: String,
+    base_dir: PathBuf,
 }
 
 #[pymethods]
 impl WAILGenerator {
     #[new]
-    fn new() -> Self {
+    #[pyo3(text_signature = "(base_dir=None)")]
+    fn new(base_dir: Option<String>) -> Self {
+        let dir = match base_dir {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_dir().unwrap(),
+        };
+
         Self {
             wail_content: String::new(),
+            base_dir: dir,
         }
     }
 
@@ -64,8 +74,9 @@ impl WAILGenerator {
 
         self.wail_content = content;
 
-        let parser = wail_parser::WAILParser::new();
-        let res = parser.parse_wail_file(&self.wail_content);
+        let parser = wail_parser::WAILParser::new(self.base_dir.clone());
+        let res =
+            parser.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true);
 
         match res {
             Ok(_) => Ok(None),
@@ -100,6 +111,26 @@ impl WAILGenerator {
                     wail_parser::WAILParseError::MissingMainBlock => {
                         py_dict.set_item("error_type", "MissingMainBlock")?;
                     }
+                    wail_parser::WAILParseError::CircularImport { path, chain } => {
+                        py_dict.set_item("error_type", "CircularImport")?;
+                        py_dict.set_item("path", path)?;
+                        py_dict.set_item("chain", chain)?;
+                    }
+                    wail_parser::WAILParseError::InvalidImportPath { path, error } => {
+                        py_dict.set_item("error_type", "InvalidImportPath")?;
+                        py_dict.set_item("path", path)?;
+                        py_dict.set_item("error", error)?;
+                    }
+                    wail_parser::WAILParseError::FileError { path, error } => {
+                        py_dict.set_item("error_type", "FileError")?;
+                        py_dict.set_item("path", path)?;
+                        py_dict.set_item("error", error)?;
+                    }
+                    wail_parser::WAILParseError::ImportNotFound { name, path } => {
+                        py_dict.set_item("error_type", "ImportNotFound")?;
+                        py_dict.set_item("name", name)?;
+                        py_dict.set_item("path", path)?;
+                    }
                     wail_parser::WAILParseError::InvalidTemplateCall {
                         template_name,
                         reason,
@@ -121,7 +152,7 @@ impl WAILGenerator {
         &self,
         kwargs: Option<&PyDict>,
     ) -> PyResult<(Option<String>, Vec<String>, Vec<String>)> {
-        let parser = wail_parser::WAILParser::new();
+        let parser = wail_parser::WAILParser::new(self.base_dir.clone());
 
         // Convert kwargs to HashMap<String, JsonValue> if provided
         let template_arg_values = if let Some(kwargs) = kwargs {
@@ -150,7 +181,7 @@ impl WAILGenerator {
         };
 
         // First parse and validate the WAIL schema
-        match parser.parse_wail_file(&self.wail_content) {
+        match parser.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true) {
             Ok(_) => {
                 let (warnings, errors) = parser.validate();
 
@@ -218,10 +249,12 @@ impl WAILGenerator {
     #[pyo3(text_signature = "($self, llm_output)")]
     fn parse_llm_output(&self, llm_output: String) -> PyResult<PyObject> {
         // Do all JSON parsing and validation outside the GIL
-        let parser = wail_parser::WAILParser::new();
+        let parser = wail_parser::WAILParser::new(self.base_dir.clone());
 
         // Parse WAIL schema first
-        if let Err(e) = parser.parse_wail_file(&self.wail_content) {
+        if let Err(e) =
+            parser.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true)
+        {
             return Err(PyValueError::new_err(format!(
                 "Failed to parse WAIL schema: {:?}",
                 e
@@ -246,10 +279,10 @@ impl WAILGenerator {
     /// Validate the loaded WAIL schema and the LLM output against the schema
     #[pyo3(text_signature = "($self)")]
     fn validate_wail(&self) -> PyResult<(Vec<String>, Vec<String>)> {
-        let parser = wail_parser::WAILParser::new();
+        let parser = wail_parser::WAILParser::new(self.base_dir.clone());
 
         // First parse and validate the WAIL schema
-        match parser.parse_wail_file(&self.wail_content) {
+        match parser.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true) {
             Ok(_) => {
                 let (warnings, errors) = parser.validate();
 
@@ -334,8 +367,11 @@ mod tests {
         prompt { {{person}} }
     }"#;
 
-        let parser = wail_parser::WAILParser::new();
-        parser.parse_wail_file(schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = wail_parser::WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         let valid = r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding"]}}"#;
         let res = parser.validate_json(valid);
@@ -376,8 +412,11 @@ mod tests {
        prompt { {{container}} }
    }"#;
 
-        let parser = wail_parser::WAILParser::new();
-        parser.parse_wail_file(schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = wail_parser::WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         // Valid array of union objects
         let valid = r#"{"container": {
@@ -420,8 +459,11 @@ mod tests {
                prompt { {{result}} }
            }"#;
 
-            let parser = wail_parser::WAILParser::new();
-            parser.parse_wail_file(schema).unwrap();
+            let test_dir = std::env::current_dir().unwrap();
+            let parser = wail_parser::WAILParser::new(test_dir);
+            parser
+                .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+                .unwrap();
 
             let valid_success = r#"
             <result>
@@ -466,8 +508,11 @@ mod tests {
                prompt { {{result}} }
            }"#;
 
-            let parser = wail_parser::WAILParser::new();
-            parser.parse_wail_file(schema).unwrap();
+            let test_dir = std::env::current_dir().unwrap();
+            let parser = wail_parser::WAILParser::new(test_dir);
+            parser
+                .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+                .unwrap();
 
             let valid_success = r#"<result>{"message": "ok"}</result>"#;
             let res = parser.parse_llm_output(valid_success);
@@ -501,8 +546,11 @@ mod tests {
                prompt { {{result}} }
            }"#;
 
-            let parser = wail_parser::WAILParser::new();
-            parser.parse_wail_file(schema).unwrap();
+            let test_dir = std::env::current_dir().unwrap();
+            let parser = wail_parser::WAILParser::new(test_dir);
+            parser
+                .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+                .unwrap();
 
             let valid = r#"<result>[
                {"message": "ok"},
@@ -541,8 +589,11 @@ mod tests {
         prompt { {{result}} }
     }"#;
 
-        let parser = wail_parser::WAILParser::new();
-        parser.parse_wail_file(schema).unwrap();
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = wail_parser::WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
 
         // Test wrong type in array
         let wrong_type = r#"{"result": [
