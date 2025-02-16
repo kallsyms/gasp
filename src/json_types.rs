@@ -64,6 +64,22 @@ pub enum Number {
     Float(f64),
 }
 
+impl Number {
+    pub fn is_i64(&self) -> bool {
+        match self {
+            Self::Integer(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            Self::Integer(i) => i.clone(),
+            _ => panic!("Tried to take float as integer."),
+        }
+    }
+}
+
 impl fmt::Display for Number {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

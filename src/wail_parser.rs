@@ -1484,9 +1484,223 @@ impl<'a> WAILParser<'a> {
         Ok((input, res))
     }
 
-    pub fn validate_json(&self, json: &str) -> Result<(), String> {
+    pub fn get_error_location(&self, error: &JsonValidationError) -> Vec<PathSegment> {
+        match error {
+            JsonValidationError::ObjectMissingMetaType => {
+                vec![PathSegment::MissingMetaType]
+            }
+            JsonValidationError::ObjectNestedTypeValidation((field, nested_error)) => {
+                let mut path = vec![PathSegment::Field(field.clone())];
+                path.extend(self.get_error_location(nested_error));
+                path
+            }
+            JsonValidationError::ArrayElementTypeError((index, nested_error)) => {
+                let mut path = vec![PathSegment::ArrayIndex(*index)];
+                path.extend(self.get_error_location(nested_error));
+                path
+            }
+            JsonValidationError::NotMemberOfUnion((field, validation_errors)) => {
+                // Extract the possible types from validation_errors
+                let union_types = validation_errors
+                    .iter()
+                    .map(|(type_name, _)| type_name.clone())
+                    .collect();
+                vec![PathSegment::UnionType(field.clone(), union_types)]
+            }
+            JsonValidationError::ObjectMissingRequiredField(field) => {
+                vec![PathSegment::Field(field.clone())]
+            }
+            JsonValidationError::ExpectedTypeError((field, expected_type)) => {
+                vec![PathSegment::ExpectedType(
+                    field.clone(),
+                    expected_type.clone(),
+                )]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn infer_type_from_fields(&self, fields: &HashMap<String, JsonValue>) -> Option<String> {
+        let mut matches: Vec<String> = vec![];
+
+        let reg_borrow = self.registry.borrow();
+
+        for (name, field) in reg_borrow.clone().into_iter() {
+            match field.field_type.field_definitions() {
+                Some(obj_fields) => {
+                    for field in obj_fields {
+                        if !fields.contains_key(&field.name) {
+                            continue;
+                        }
+                    }
+
+                    matches.push(name.clone())
+                }
+                None => continue,
+            }
+        }
+
+        if matches.len() > 1 || matches.len() == 0 {
+            None
+        } else {
+            Some(matches.first().unwrap().clone())
+        }
+    }
+
+    // Helper function to apply fixes based on the path
+    pub fn fix_json_value(&self, json: &mut JsonValue, path: &[PathSegment]) -> Result<(), String> {
+        println!("{:?}", path);
+        match path.split_first() {
+            Some((PathSegment::MissingMetaType, _)) => {
+                if let JsonValue::Object(map) = json {
+                    if let Some(inferred_type) = self.infer_type_from_fields(map) {
+                        map.insert("_type".to_string(), JsonValue::String(inferred_type));
+                        Ok(())
+                    } else {
+                        Err("Could not unambiguously determine type from fields".to_string())
+                    }
+                } else {
+                    Err("Expected object".to_string())
+                }
+            }
+            Some((PathSegment::ArrayIndex(idx), rest)) => {
+                println!("{:?}", json);
+                if let JsonValue::Array(arr) = json {
+                    if let Some(element) = arr.get_mut(*idx) {
+                        self.fix_json_value(element, rest)
+                    } else {
+                        Err(format!("Expected element in array at index {idx}"))
+                    }
+                } else {
+                    Err("Expected to be array at this level.".to_string())
+                }
+            }
+            Some((PathSegment::Field(field), rest)) => {
+                Err(format!("Missing field {field} from object."))
+            }
+            Some((PathSegment::UnionType(field, possible_types), _)) => {
+                // if let JsonValue::Object(map) = json {
+
+                // }
+                Err(format!("Not attempting to coerce union type."))
+            }
+            Some((PathSegment::ExpectedType(field, expected), rest)) => match field {
+                None => match expected.as_str() {
+                    "String" => match json {
+                        JsonValue::Number(n) => {
+                            *json = JsonValue::String(n.to_string());
+                            Ok(())
+                        }
+                        JsonValue::Boolean(b) => {
+                            *json = JsonValue::String(b.to_string());
+                            Ok(())
+                        }
+                        JsonValue::Null => {
+                            *json = JsonValue::String("null".to_string());
+                            Ok(())
+                        }
+                        JsonValue::String(_) => Ok(()), // Already a string
+                        _ => Err("Cannot convert to string".to_string()),
+                    },
+                    "Number" => match json {
+                        JsonValue::String(s) => {
+                            if let Ok(n) = s.parse::<i64>() {
+                                *json = JsonValue::Number(Number::Integer(n.into()));
+                                Ok(())
+                            } else {
+                                Err("String is not a valid number".to_string())
+                            }
+                        }
+                        JsonValue::Boolean(b) => {
+                            *json =
+                                JsonValue::Number(Number::Integer(if *b { 1 } else { 0 }.into()));
+                            Ok(())
+                        }
+                        JsonValue::Number(_) => Ok(()), // Already a number
+                        _ => Err("Cannot convert to number".to_string()),
+                    },
+                    "Boolean" => match json {
+                        JsonValue::String(s) => match s.to_lowercase().as_str() {
+                            "true" | "1" => {
+                                *json = JsonValue::Boolean(true);
+                                Ok(())
+                            }
+                            "false" | "0" => {
+                                *json = JsonValue::Boolean(false);
+                                Ok(())
+                            }
+                            _ => Err("String is not a valid boolean".to_string()),
+                        },
+                        JsonValue::Number(n) => {
+                            if n.is_i64() {
+                                match n.as_i64() {
+                                    0 => {
+                                        *json = JsonValue::Boolean(false);
+                                        Ok(())
+                                    }
+                                    1 => {
+                                        *json = JsonValue::Boolean(true);
+                                        Ok(())
+                                    }
+                                    _ => Err("Number is not 0 or 1".to_string()),
+                                }
+                            } else {
+                                Err("Cannot convert float to boolean".to_string())
+                            }
+                        }
+                        JsonValue::Boolean(_) => Ok(()), // Already a bool
+                        _ => Err("Cannot convert to boolean".to_string()),
+                    },
+                    "Null" => {
+                        *json = JsonValue::Null;
+                        Ok(())
+                    }
+                    _ => Err("Unrecognized type for conversion".to_string()),
+                },
+                Some(field_name) => match json {
+                    JsonValue::Object(map) => {
+                        if let Some(value) = map.get_mut(field_name) {
+                            self.fix_json_value(value, rest)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(format!(
+                        "Cannot access field {} on non-object value",
+                        field_name
+                    )),
+                },
+            },
+            Some((PathSegment::Root((_template, variable)), rest)) => match variable {
+                Some(field_name) => match json {
+                    JsonValue::Object(map) => {
+                        if let Some(value) = map.get_mut(field_name) {
+                            self.fix_json_value(value, rest)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(format!(
+                        "Cannot access field {} on non-object value",
+                        field_name
+                    )),
+                },
+                None => self.fix_json_value(json, rest),
+            },
+            None => Err("Invalid error path -no segments".to_string()),
+        }
+    }
+
+    pub fn validate_json(
+        &self,
+        json: &str,
+    ) -> Result<(), (String, Option<String>, JsonValidationError)> {
         let mut parser = JsonParser::new(json.as_bytes().to_vec());
-        let value = parser.parse().map_err(|e| e.to_string())?;
+        let value = parser.parse().map_err(|e| {
+            (
+                "".to_string(),
+                None,
+                JsonValidationError::JsonParserError(e),
+            )
+        })?;
 
         self.main
             .borrow()

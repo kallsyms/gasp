@@ -12,6 +12,7 @@ use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString};
 use pyo3::Python;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use types::JsonValidationError;
 use wail_parser::WAILFileType;
 
 use crate::json_types::{JsonValue, Number};
@@ -266,14 +267,20 @@ impl WAILGenerator {
             .parse_llm_output(&llm_output)
             .map_err(|e| PyValueError::new_err(format!("Failed to parse LLM output: {:?}", e)))?;
 
-        parser
-            .validate_json(&parsed_output.to_string())
-            .map_err(|e| {
-                PyValueError::new_err(format!("Failed to validate LLM output: {:?}", e))
-            })?;
+        let mut validation_output = parsed_output.clone();
+        while let Err((template, variable, e)) =
+            parser.validate_json(&validation_output.clone().to_string())
+        {
+            let path = parser.get_error_location(&e);
+            parser
+                .fix_json_value(&mut validation_output, &path)
+                .map_err(|e| {
+                    PyValueError::new_err(format!("Failed to validate LLM output: {:?}", e))
+                })?;
+        }
 
         // Only acquire the GIL when we need to create Python objects
-        Python::with_gil(|py| Ok(json_value_to_py_object(py, &parsed_output)))
+        Python::with_gil(|py| Ok(json_value_to_py_object(py, &validation_output)))
     }
 
     /// Validate the loaded WAIL schema and the LLM output against the schema
@@ -349,6 +356,8 @@ fn gasp(_py: Python, m: &PyModule) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::var;
+
     use super::*;
 
     #[test]
@@ -569,25 +578,24 @@ mod tests {
             assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
         }
     }
-
     #[test]
     fn test_validation_error_messages() {
         let schema = r#"
-    object Success { message: String }
-    object Error { 
-        code: Number
-        details: String
-    }
-    union Response = Success | Error;
-    
-    template Test() -> Response[] {
-        prompt: """Test"""
-    }
-    
-    main {
-        let result = Test();
-        prompt { {{result}} }
-    }"#;
+        object Success { message: String }
+        object Error { 
+            code: Number
+            details: String
+        }
+        union Response = Success | Error;
+        
+        template Test() -> Response[] {
+            prompt: """Test"""
+        }
+        
+        main {
+            let result = Test();
+            prompt { {{result}} }
+        }"#;
 
         let test_dir = std::env::current_dir().unwrap();
         let parser = wail_parser::WAILParser::new(test_dir);
@@ -597,30 +605,134 @@ mod tests {
 
         // Test wrong type in array
         let wrong_type = r#"{"result": [
-        {"message": 123},
-        {"code": "404", "details": "error"}
-    ]}"#;
+            {"message": 123},
+            {"code": "404", "details": "error"}
+        ]}"#;
+
         let err = parser.validate_json(wrong_type).unwrap_err();
-        assert!(err.contains("Array element at index 0"));
-        assert!(err.contains("Field 'message'"));
-        assert!(err.contains("expected String"));
+
+        if let (_, _, JsonValidationError::ArrayElementTypeError((0, box_err))) = &err {
+            println!("{:?}", box_err);
+
+            if let JsonValidationError::NotMemberOfUnion((_, errors)) = &**box_err {
+                let (_msg, box2_err) = errors.first().unwrap();
+
+                let JsonValidationError::ObjectNestedTypeValidation((field, _)) = &**box2_err
+                else {
+                    panic!("not_field");
+                };
+
+                assert_eq!(*field, "message".to_string());
+            } else {
+                panic!("Expected ");
+            }
+        } else {
+            panic!("Expected ArrayElementTypeError");
+        }
 
         // Test invalid union type
         let invalid_union = r#"{"result": [
-        {"something": "wrong"}
-    ]}"#;
-        let err = parser.validate_json(invalid_union).unwrap_err();
-        println!("{:?}", err);
-        assert!(err.contains("Array element at index 0"));
-        assert!(err.contains("Expected one of: Success | Error"));
+            {"something": "wrong"}
+        ]}"#;
+        let (_, _, err) = parser.validate_json(invalid_union).unwrap_err();
+        assert!(matches!(err,
+            JsonValidationError::ArrayElementTypeError((0, box_err))
+            if matches!(*box_err, JsonValidationError::NotMemberOfUnion(_))
+        ));
 
         // Test wrong type in nested field
         let wrong_nested = r#"{"result": [
-        {"code": false, "details": "error"}
-    ]}"#;
+            {"code": false, "details": "error"}
+        ]}"#;
         let err = parser.validate_json(wrong_nested).unwrap_err();
-        assert!(err.contains("Array element at index 0"));
-        assert!(err.contains("Field 'code'"));
-        assert!(err.contains("expected Number"));
+        println!("{:?}", err);
+        if let (_, _, JsonValidationError::ArrayElementTypeError((0, box_err))) = &err {
+            println!("{:?}", box_err);
+
+            if let JsonValidationError::NotMemberOfUnion((_, errors)) = &**box_err {
+                let (_msg, box2_err) = errors.last().unwrap();
+
+                println!("{:?}", box2_err);
+
+                let JsonValidationError::ObjectNestedTypeValidation((field, _)) = &**box2_err
+                else {
+                    panic!("not_field");
+                };
+
+                assert_eq!(*field, "code".to_string());
+            } else {
+                panic!("Expected ");
+            }
+        } else {
+            panic!("Expected ArrayElementTypeError");
+        }
+    }
+    #[test]
+    fn test_json_fix() {
+        let schema = r#"
+            object Success { message: String }
+            object Error { 
+                code: Number
+                details: String
+            }
+            union Response = Success | Error;
+            
+            template Test() -> Response[] {
+                prompt: """Test"""
+            }
+            
+            main {
+                let result = Test();
+                prompt { {{result}} }
+            }"#;
+
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = wail_parser::WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
+
+        // Test wrong type in array
+        let wrong_type = r#"{"result": [
+            {"message": 123},
+            {"code": "404", "details": "error"}
+        ]}"#;
+
+        use crate::rd_json_stack_parser::Parser;
+        let mut json = Parser::new(wrong_type.as_bytes().to_vec()).parse().unwrap();
+
+        // First validate to get the error
+        let (template, variable, err) = parser.validate_json(&json.to_string()).unwrap_err();
+
+        // Get the error path
+        let mut path = parser.get_error_location(&err);
+
+        path.insert(0, types::PathSegment::Root((template, variable)));
+
+        // Try to fix the JSON
+        parser.fix_json_value(&mut json, &path).unwrap();
+
+        // Validate again - should pass now
+        parser.validate_json(&json.to_string()).unwrap();
+
+        // Check that the fixes were applied correctly
+        if let JsonValue::Object(obj) = &json {
+            if let Some(JsonValue::Array(arr)) = obj.get("result") {
+                if let Some(JsonValue::Object(first_obj)) = arr.get(0) {
+                    if let Some(JsonValue::String(message)) = first_obj.get("message") {
+                        assert_eq!(message, "123");
+                    } else {
+                        panic!("message was not converted to string");
+                    }
+                }
+                if let Some(JsonValue::Object(second_obj)) = arr.get(1) {
+                    if let Some(JsonValue::Number(Number::Integer(code))) = second_obj.get("code") {
+                        assert_eq!(*code, 404);
+                    } else {
+                        panic!("code was not converted to number");
+                    }
+                }
+            }
+        }
     }
 }

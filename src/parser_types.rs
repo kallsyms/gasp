@@ -488,7 +488,7 @@ impl<'a> WAILMainDef<'a> {
         &self,
         json: &JsonValue,
         registry: &HashMap<String, WAILTemplateDef<'a>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), (String, Option<String>, JsonValidationError)> {
         // For each template call in statements, validate its output
         for statement in &self.statements {
             match statement {
@@ -498,7 +498,13 @@ impl<'a> WAILMainDef<'a> {
                 } => {
                     // Get the template's output type from registry
                     let template = registry.get(&template_call.template_name).ok_or_else(|| {
-                        format!("Template not found: {}", template_call.template_name)
+                        (
+                            template_call.template_name.clone(),
+                            Some(variable.clone()),
+                            JsonValidationError::TemplateNotFound(
+                                template_call.template_name.clone(),
+                            ),
+                        )
                     })?;
 
                     let template_output = &template.output;
@@ -506,35 +512,77 @@ impl<'a> WAILMainDef<'a> {
                     // Get the corresponding value from JSON response
                     let value = match json {
                         JsonValue::Object(map) => map.get(variable).ok_or_else(|| {
-                            format!("Missing output for template call: {}", variable)
+                            (
+                                template_call.template_name.clone(),
+                                Some(variable.clone()),
+                                JsonValidationError::MissingTemplateResponse(variable.clone()),
+                            )
                         })?,
-                        _ => return Err("Expected object response from LLM".to_string()),
+                        _ => {
+                            return Err((
+                                template_call.template_name.clone(),
+                                Some(variable.clone()),
+                                JsonValidationError::ExpectedObject(),
+                            ))
+                        }
                     };
 
                     // Validate the value against the template's output type
-                    template_output.field_type.validate_json(value)?;
+                    template_output
+                        .field_type
+                        .validate_json(value)
+                        .map_err(|e| {
+                            (
+                                template_call.template_name.clone(),
+                                Some(variable.clone()),
+                                e,
+                            )
+                        })?;
                 }
                 MainStatement::TemplateCall(template_call) => {
                     // Similar validation for direct template calls
-                    let template = registry.get(&template_call.template_name).ok_or_else(|| {
-                        format!("Template not found: {}", template_call.template_name)
-                    })?;
+                    let template_res = registry.get(&template_call.template_name);
+
+                    let template = match template_res {
+                        Some(t) => t,
+                        None => {
+                            return Err((
+                                template_call.template_name.clone(),
+                                None::<String>,
+                                JsonValidationError::MissingTemplateResponse(
+                                    template_call.template_name.clone(),
+                                ),
+                            ));
+                        }
+                    };
 
                     // Get the corresponding value from JSON response
                     let value = match json {
                         JsonValue::Object(map) => {
                             map.get(&template_call.template_name).ok_or_else(|| {
-                                format!(
-                                    "Missing output for template call: {}",
-                                    template_call.template_name
+                                (
+                                    template_call.template_name.clone(),
+                                    None,
+                                    JsonValidationError::MissingTemplateResponse(
+                                        template_call.template_name.clone(),
+                                    ),
                                 )
                             })?
                         }
-                        _ => return Err("Expected object response from LLM".to_string()),
+                        _ => {
+                            return Err((
+                                template_call.template_name.clone(),
+                                None,
+                                JsonValidationError::ExpectedObject(),
+                            ))
+                        }
                     };
 
                     let template_output = &template.output;
-                    template_output.field_type.validate_json(value)?;
+                    template_output
+                        .field_type
+                        .validate_json(value)
+                        .map_err(|e| (template_call.template_name.clone(), None, e))?;
                 }
                 MainStatement::Comment(_) => {}
 
@@ -542,18 +590,7 @@ impl<'a> WAILMainDef<'a> {
                     variable,
                     object_type,
                     ..
-                } => {
-                    // Get the corresponding value from JSON response
-                    let value = match json {
-                        JsonValue::Object(map) => map.get(variable).ok_or_else(|| {
-                            format!("Missing output for object instantiation: {}", variable)
-                        })?,
-                        _ => return Err("Expected object response from LLM".to_string()),
-                    };
-
-                    // Validate the value matches the object type
-                    // TODO: Look up object type definition and validate against it
-                }
+                } => {}
             }
         }
         Ok(())

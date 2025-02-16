@@ -1,4 +1,7 @@
-use crate::parser_types::{WAILAnnotation, WAILField};
+use crate::{
+    json_types::JsonError,
+    parser_types::{WAILAnnotation, WAILField},
+};
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -9,6 +12,31 @@ static NUMBER_TYPE: &str = "Number";
 static OBJECT_TYPE: &str = "Object";
 static TOOL_TYPE: &str = "Tool";
 static ARRAY_TYPE: &str = "Array";
+
+#[derive(Debug, Clone)]
+pub enum JsonValidationError {
+    ObjectMissingAllFields,
+    ObjectMissingMetaType,
+    ObjectMissingRequiredField(String),
+    ObjectNestedTypeValidation((String, Box<JsonValidationError>)),
+    ArrayElementTypeError((usize, Box<JsonValidationError>)),
+    NotMemberOfUnion((String, Vec<(String, Box<JsonValidationError>)>)),
+    ExpectedTypeError((Option<String>, String)),
+    TemplateNotFound(String),
+    MissingTemplateResponse(String),
+    ExpectedObject(),
+    JsonParserError(JsonError),
+}
+
+#[derive(Debug)]
+pub enum PathSegment {
+    Root((String, Option<String>)),
+    Field(String),
+    ArrayIndex(usize),
+    UnionType(String, Vec<String>), // Store the expected union types
+    MissingMetaType,
+    ExpectedType(Option<String>, String),
+}
 
 #[derive(Debug, Clone)]
 pub enum WAILValue {
@@ -186,7 +214,7 @@ impl<'a> WAILType<'a> {
         }
     }
 
-    pub fn validate_json(&self, json: &JsonValue) -> Result<(), String> {
+    pub fn validate_json(&self, json: &JsonValue) -> Result<(), JsonValidationError> {
         match (self, json) {
             // Object validation with path context
             (WAILType::Composite(WAILCompositeType::Object(obj)), JsonValue::Object(map)) => {
@@ -194,17 +222,23 @@ impl<'a> WAILType<'a> {
                     .type_data
                     .field_definitions
                     .as_ref()
-                    .ok_or("Object type missing field definitions")?;
+                    .ok_or(JsonValidationError::ObjectMissingAllFields)?;
 
                 for field in fields {
                     match map.get(&field.name) {
-                        Some(value) => field
-                            .field_type
-                            .validate_json(value)
-                            .map_err(|e| format!("Field '{}': {}", field.name, e))?,
+                        Some(value) => field.field_type.validate_json(value).map_err(|err| {
+                            JsonValidationError::ObjectNestedTypeValidation((
+                                field.name.clone(),
+                                Box::new(err),
+                            ))
+                        })?,
                         None => {
                             if field.name != "_type" {
-                                return Err(format!("Missing required field: {}", field.name));
+                                return Err(JsonValidationError::ObjectMissingRequiredField(
+                                    field.name.clone(),
+                                ));
+                            } else {
+                                return Err(JsonValidationError::ObjectMissingMetaType);
                             }
                         }
                     }
@@ -216,9 +250,9 @@ impl<'a> WAILType<'a> {
             (WAILType::Composite(WAILCompositeType::Array(arr)), JsonValue::Array(values)) => {
                 if let Some(element_type) = &arr.type_data.element_type {
                     for (idx, value) in values.iter().enumerate() {
-                        element_type
-                            .validate_json(value)
-                            .map_err(|e| format!("Array element at index {}: {}", idx, e))?;
+                        element_type.validate_json(value).map_err(|e| {
+                            JsonValidationError::ArrayElementTypeError((idx, Box::new(e)))
+                        })?;
                     }
                 }
                 Ok(())
@@ -226,44 +260,55 @@ impl<'a> WAILType<'a> {
 
             (WAILType::Composite(WAILCompositeType::Union(union)), value) => {
                 let mut errors = Vec::new();
-                errors.push(format!(
-                    "Expected one of: {}",
-                    union
-                        .members
-                        .iter()
-                        .map(|m| m.type_name())
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                ));
+                let mut has_error = false;
                 for member_type in &union.members {
                     match member_type.validate_json(value) {
                         Ok(()) => return Ok(()),
-                        Err(e) => errors.push(format!("{}: {}", member_type.type_name(), e)),
+                        Err(e) => {
+                            has_error = true;
+                            errors.push((member_type.type_name().to_string(), Box::new(e)))
+                        }
                     }
                 }
-                Err(format!(
-                    "Value did not match any union type:\n{}",
-                    errors.join("\n")
-                ))
+
+                let members = union
+                    .members
+                    .iter()
+                    .map(|m| m.type_name())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+                    .to_string();
+
+                if has_error {
+                    Err(JsonValidationError::NotMemberOfUnion((members, errors)))
+                } else {
+                    Ok(())
+                }
             }
 
             // Simple type validation with type context
             (WAILType::Simple(WAILSimpleType::String(_)), JsonValue::String(_)) => Ok(()),
-            (WAILType::Simple(WAILSimpleType::Number(_)), JsonValue::Number(_)) => Ok(()),
+            (WAILType::Simple(WAILSimpleType::Number(wail_num)), JsonValue::Number(json_num)) => {
+                match (wail_num, json_num) {
+                    (WAILNumber::Float(_), Number::Integer(_)) => Err(
+                        JsonValidationError::ExpectedTypeError((None, "Float".to_string())),
+                    ),
+                    _ => Ok(()),
+                }
+            }
 
             // Type mismatch with expected type info
-            _ => Err(format!(
-                "Type mismatch: expected {}, got {}",
-                self.type_name(),
+            _ => Err(JsonValidationError::ExpectedTypeError((
+                None,
                 match json {
-                    JsonValue::String(_) => "String",
-                    JsonValue::Number(_) => "Number",
-                    JsonValue::Object(_) => "Object",
-                    JsonValue::Array(_) => "Array",
-                    JsonValue::Boolean(_) => "Boolean",
-                    JsonValue::Null => "Null",
-                }
-            )),
+                    JsonValue::String(_) => "String".to_string(),
+                    JsonValue::Number(_) => "Number".to_string(),
+                    JsonValue::Object(_) => "Object".to_string(),
+                    JsonValue::Array(_) => "Array".to_string(),
+                    JsonValue::Boolean(_) => "Boolean".to_string(),
+                    JsonValue::Null => "Null".to_string(),
+                },
+            ))),
         }
     }
 }
