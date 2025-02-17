@@ -573,6 +573,46 @@ mod tests {
             assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
         }
     }
+
+    #[test]
+    fn test_bad_array_recovery() {
+        let schema = r#"
+        object Success { message: String }
+        object Error { 
+            code: Number
+            details: String
+        }
+        union Response = Success | Error;
+        
+        template Test() -> Response[] {
+            prompt: """Test"""
+        }
+        
+        main {
+            let result = Test();
+            prompt { {{result}} }
+        }"#;
+
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = wail_parser::WAILParser::new(test_dir);
+        parser
+            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .unwrap();
+
+        let result = r#"
+        <result>
+            {"message": 123},
+            {"code": "404", "details": "error"}
+</result>
+        "#;
+
+        let mut json = parser.parse_llm_output(&result).unwrap();
+
+        parser.validate_and_fix(&mut json).unwrap();
+
+        println!("{:?}", json.to_string());
+    }
+
     #[test]
     fn test_validation_error_messages() {
         let schema = r#"
