@@ -11,7 +11,7 @@ WAIL (Widely Applicable Interface Language) is a schema language designed for:
 
 ## Why
 
-In our expereince the ergonomics around tool calling kind of suck right now and in the lowest common denominator settings are down right painful.
+In our experience the ergonomics around tool calling kind of suck right now and in the lowest common denominator settings are down right painful.
 
 If you're using OpenRouter (which is great) they choose not to support some platform specific features (understandable) like the "ANY" parameter from Anthropic so you wind up with super verbose output, the occasional no tool call, missing params even when specified in "required" and so we decided to implement this prompt creator and schema validator because what are tool calls other than type interfaces. 
 
