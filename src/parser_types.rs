@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILAnnotation {
     Description(String), // Detailed explanation of purpose/meaning
     Example(String),     // Concrete examples of valid values/usage
@@ -42,13 +42,7 @@ impl Display for WAILAnnotation {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct WAILUnionDef<'a> {
-    pub name: String,
-    pub members: Vec<WAILType<'a>>,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TemplateArgument {
     String(String),
     Number(i64),
@@ -58,13 +52,13 @@ pub enum TemplateArgument {
     ObjectRef(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILTemplateCall {
     pub template_name: String,
     pub arguments: HashMap<String, TemplateArgument>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MainStatement {
     Assignment {
         variable: String,
@@ -79,7 +73,7 @@ pub enum MainStatement {
     Comment(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILField<'a> {
     pub name: String,
     pub field_type: WAILType<'a>,
@@ -99,7 +93,7 @@ pub struct WAILObjectInstantiation {
     pub fields: HashMap<String, TemplateArgument>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILTemplateDef<'a> {
     pub name: String,
     pub inputs: Vec<WAILField<'a>>,
@@ -108,7 +102,7 @@ pub struct WAILTemplateDef<'a> {
     pub annotations: Vec<WAILAnnotation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILMainDef<'a> {
     pub statements: Vec<MainStatement>,
     pub prompt: String,
@@ -724,10 +718,6 @@ impl<'a> WAILTemplateDef<'a> {
                         _ => general_annotations.push(annotation),
                     }
                 }
-
-                // Add general annotations
-                println!("General annotations: {:?}", general_annotations);
-                println!("Field annotations: {:?}", field_annotations);
 
                 if !general_annotations.is_empty() {
                     param_info.push_str("\n# General:\n");

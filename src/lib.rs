@@ -263,24 +263,16 @@ impl WAILGenerator {
         }
 
         // Parse and validate the LLM output
-        let parsed_output = parser
+        let mut parsed_output = parser
             .parse_llm_output(&llm_output)
             .map_err(|e| PyValueError::new_err(format!("Failed to parse LLM output: {:?}", e)))?;
 
-        let mut validation_output = parsed_output.clone();
-        while let Err((template, variable, e)) =
-            parser.validate_json(&validation_output.clone().to_string())
-        {
-            let path = parser.get_error_location(&e);
-            parser
-                .fix_json_value(&mut validation_output, &path)
-                .map_err(|e| {
-                    PyValueError::new_err(format!("Failed to validate LLM output: {:?}", e))
-                })?;
-        }
+        parser.validate_and_fix(&mut parsed_output).map_err(|e| {
+            PyValueError::new_err(format!("Failed to validate LLM output: {:?}", e))
+        })?;
 
         // Only acquire the GIL when we need to create Python objects
-        Python::with_gil(|py| Ok(json_value_to_py_object(py, &validation_output)))
+        Python::with_gil(|py| Ok(json_value_to_py_object(py, &parsed_output)))
     }
 
     /// Validate the loaded WAIL schema and the LLM output against the schema
@@ -382,7 +374,7 @@ mod tests {
             .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
             .unwrap();
 
-        let valid = r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding"]}}"#;
+        let valid = r#"{"person": {"name": "Alice", "age": 25, "interests": ["coding"], "_type": "Person"}}"#;
         let res = parser.validate_json(valid);
         println!("res {:?}", res);
         assert!(res.is_ok());
@@ -429,12 +421,15 @@ mod tests {
 
         // Valid array of union objects
         let valid = r#"{"container": {
+        "_type": "Container",
        "items": [
-           {"message": "ok"},
-           {"code": 404, "message": "Not found"}
+           {"message": "ok", "_type": "Success"},
+           {"code": 404, "message": "Not found", "_type": "Error"}
        ]
    }}"#;
-        assert!(parser.validate_json(valid).is_ok());
+        let res = parser.validate_json(valid);
+        println!("{:?}", res);
+        assert!(res.is_ok());
 
         // Invalid - object missing required field
         let invalid_obj = r#"{"container": {
@@ -476,7 +471,7 @@ mod tests {
 
             let valid_success = r#"
             <result>
-            {"message": "ok"}
+            {"message": "ok", "_type": "Success"}
             </result>
             "#;
             let res = parser.parse_llm_output(valid_success);
@@ -487,14 +482,14 @@ mod tests {
             assert!(res2.is_ok());
 
             let valid_error = r#"<result>
-            {"code": 404}
+            {"code": 404, "_type": "Code"}
             </result>"#;
             let res = parser.parse_llm_output(valid_error);
             assert!(res.is_ok());
             assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
             let invalid = r#"<result>
-            {"code": "404"}
+            {"code": "404", "_type": "Code"}
             </result>"#;
             let res = parser.parse_llm_output(invalid);
             assert!(res.is_ok());
@@ -523,17 +518,17 @@ mod tests {
                 .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
                 .unwrap();
 
-            let valid_success = r#"<result>{"message": "ok"}</result>"#;
+            let valid_success = r#"<result>{"message": "ok", "_type": "Success"}</result>"#;
             let res = parser.parse_llm_output(valid_success);
             assert!(res.is_ok());
             assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
-            let valid_error = r#"<result>{"code": 404}</result>"#;
+            let valid_error = r#"<result>{"code": 404, "_type": "Error"}</result>"#;
             let res = parser.parse_llm_output(valid_error);
             assert!(res.is_ok());
             assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
-            let invalid = r#"<result>{"code": "404"}</result>"#;
+            let invalid = r#"<result>{"code": "404", "_type": "Error"}</result>"#;
             let res = parser.parse_llm_output(invalid);
             assert!(res.is_ok());
             assert!(parser.validate_json(&res.unwrap().to_string()).is_err());
@@ -562,16 +557,16 @@ mod tests {
                 .unwrap();
 
             let valid = r#"<result>[
-               {"message": "ok"},
-               {"code": 404}
+               {"message": "ok", "_type": "Success"},
+               {"code": 404, "_type": "Error"}
            ]</result>"#;
             let res = parser.parse_llm_output(valid);
             assert!(res.is_ok());
             assert!(parser.validate_json(&res.unwrap().to_string()).is_ok());
 
             let invalid = r#"<result>[
-               {"message": "ok"},
-               {"code": "404"}
+               {"message": "ok", "_type": "Success"},
+               {"code": "404", "_type": "Error"}
            ]</result>"#;
             let res = parser.parse_llm_output(invalid);
             assert!(res.is_ok());
@@ -702,18 +697,7 @@ mod tests {
         let mut json = Parser::new(wrong_type.as_bytes().to_vec()).parse().unwrap();
 
         // First validate to get the error
-        let (template, variable, err) = parser.validate_json(&json.to_string()).unwrap_err();
-
-        // Get the error path
-        let mut path = parser.get_error_location(&err);
-
-        path.insert(0, types::PathSegment::Root((template, variable)));
-
-        // Try to fix the JSON
-        parser.fix_json_value(&mut json, &path).unwrap();
-
-        // Validate again - should pass now
-        parser.validate_json(&json.to_string()).unwrap();
+        parser.validate_and_fix(&mut json).unwrap();
 
         // Check that the fixes were applied correctly
         if let JsonValue::Object(obj) = &json {
@@ -730,6 +714,28 @@ mod tests {
                         assert_eq!(*code, 404);
                     } else {
                         panic!("code was not converted to number");
+                    }
+                }
+            }
+        }
+
+        let wrong_type = r#"{"result":
+            {"message": 123},
+        }"#;
+
+        let mut json = Parser::new(wrong_type.as_bytes().to_vec()).parse().unwrap();
+
+        // First validate to get the error
+        parser.validate_and_fix(&mut json).unwrap();
+
+        // Check that the fixes were applied correctly
+        if let JsonValue::Object(obj) = &json {
+            if let Some(JsonValue::Array(arr)) = obj.get("result") {
+                if let Some(JsonValue::Object(first_obj)) = arr.get(0) {
+                    if let Some(JsonValue::String(message)) = first_obj.get("message") {
+                        assert_eq!(message, "123");
+                    } else {
+                        panic!("message was not converted to string");
                     }
                 }
             }

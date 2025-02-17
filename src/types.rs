@@ -33,12 +33,12 @@ pub enum PathSegment {
     Root((String, Option<String>)),
     Field(String),
     ArrayIndex(usize),
-    UnionType(String, Vec<String>), // Store the expected union types
+    UnionType(String, Vec<(String, Box<JsonValidationError>)>),
     MissingMetaType,
     ExpectedType(Option<String>, String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILValue {
     String(String),
     Number(i64),
@@ -46,32 +46,33 @@ pub enum WAILValue {
     TypeRef(String), // For when we reference a type like "String" or "Number"
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILSimpleType<'a> {
     String(WAILString<'a>),
+    Boolean(WAILBoolean<'a>),
     Number(WAILNumber<'a>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILCompositeType<'a> {
     Object(WAILObject<'a>),
     Array(WAILArray<'a>),
     Union(WAILUnion<'a>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILUnion<'a> {
-    pub members: Vec<WAILType<'a>>,
+    pub members: Vec<WAILField<'a>>,
     pub type_data: WAILTypeData<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILArray<'a> {
     pub values: Vec<WAILType<'a>>,
     pub type_data: WAILTypeData<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILType<'a> {
     Simple(WAILSimpleType<'a>),
     Composite(WAILCompositeType<'a>),
@@ -116,6 +117,7 @@ impl<'a> WAILType<'a> {
                     }
                 }
                 WAILSimpleType::Number(_) => "number".to_string(),
+                WAILSimpleType::Boolean(_) => "boolean".to_string(),
             },
             WAILType::Composite(composite) => match composite {
                 WAILCompositeType::Object(obj) => {
@@ -155,13 +157,16 @@ impl<'a> WAILType<'a> {
                             schema.push_str("\n\n-- OR --\n\n");
                         }
                         schema.push_str(&format!("Format {}: ", i + 1));
-                        match member {
+                        match member.field_type {
                             WAILType::Simple(_) => {
-                                schema.push_str(&member.to_schema());
+                                schema.push_str(&member.field_type.to_schema());
                             }
                             _ => {
-                                schema.push_str(&format!("{}: ", member.type_data().type_name));
-                                schema.push_str(&member.to_schema());
+                                schema.push_str(&format!(
+                                    "{}: ",
+                                    member.field_type.type_data().type_name
+                                ));
+                                schema.push_str(&member.field_type.to_schema());
                             }
                         }
                     }
@@ -204,6 +209,7 @@ impl<'a> WAILType<'a> {
                     WAILNumber::Integer(i) => &i.type_data,
                     WAILNumber::Float(f) => &f.type_data,
                 },
+                WAILSimpleType::Boolean(b) => &b.type_data,
             },
             WAILType::Composite(composite) => match composite {
                 WAILCompositeType::Object(o) => &o.type_data,
@@ -262,11 +268,12 @@ impl<'a> WAILType<'a> {
                 let mut errors = Vec::new();
                 let mut has_error = false;
                 for member_type in &union.members {
-                    match member_type.validate_json(value) {
+                    match member_type.field_type.validate_json(value) {
                         Ok(()) => return Ok(()),
                         Err(e) => {
                             has_error = true;
-                            errors.push((member_type.type_name().to_string(), Box::new(e)))
+                            errors
+                                .push((member_type.field_type.type_name().to_string(), Box::new(e)))
                         }
                     }
                 }
@@ -274,7 +281,7 @@ impl<'a> WAILType<'a> {
                 let members = union
                     .members
                     .iter()
-                    .map(|m| m.type_name())
+                    .map(|m| m.field_type.type_name())
                     .collect::<Vec<_>>()
                     .join(" | ")
                     .to_string();
@@ -296,23 +303,22 @@ impl<'a> WAILType<'a> {
                     _ => Ok(()),
                 }
             }
-
             // Type mismatch with expected type info
-            _ => Err(JsonValidationError::ExpectedTypeError((
+            (wail_type, _) => Err(JsonValidationError::ExpectedTypeError((
                 None,
-                match json {
-                    JsonValue::String(_) => "String".to_string(),
-                    JsonValue::Number(_) => "Number".to_string(),
-                    JsonValue::Object(_) => "Object".to_string(),
-                    JsonValue::Array(_) => "Array".to_string(),
-                    JsonValue::Boolean(_) => "Boolean".to_string(),
-                    JsonValue::Null => "Null".to_string(),
+                match wail_type {
+                    WAILType::Simple(WAILSimpleType::String(_)) => "String".to_string(),
+                    WAILType::Simple(WAILSimpleType::Number(_)) => "Number".to_string(),
+                    WAILType::Composite(WAILCompositeType::Object(_)) => "Object".to_string(),
+                    WAILType::Composite(WAILCompositeType::Array(_)) => "Array".to_string(),
+                    WAILType::Simple(WAILSimpleType::Boolean(_)) => "Boolean".to_string(),
+                    _ => "String".to_string(),
                 },
             ))),
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILTypeData<'a> {
     pub json_type: JsonValue,
     pub type_name: &'a str,
@@ -320,25 +326,25 @@ pub struct WAILTypeData<'a> {
     pub element_type: Option<Box<WAILType<'a>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILInteger<'a> {
     pub value: u64,
     pub type_data: WAILTypeData<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILFloat<'a> {
     pub value: f64,
     pub type_data: WAILTypeData<'a>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILNumber<'a> {
     Integer(WAILInteger<'a>),
     Float(WAILFloat<'a>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILObject<'a> {
     pub value: HashMap<WAILString<'a>, WAILType<'a>>,
     pub type_data: WAILTypeData<'a>,
@@ -346,6 +352,12 @@ pub struct WAILObject<'a> {
 
 #[derive(Debug, Clone)]
 pub struct WAILString<'a> {
+    pub value: String,
+    pub type_data: WAILTypeData<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WAILBoolean<'a> {
     pub value: String,
     pub type_data: WAILTypeData<'a>,
 }
@@ -494,6 +506,7 @@ impl<'a> From<WAILType<'a>> for JsonValue {
                     WAILNumber::Integer(i) => JsonValue::Number(Number::Integer(i.value as i64)),
                     WAILNumber::Float(f) => JsonValue::Number(Number::Float(f.value)),
                 },
+                WAILSimpleType::Boolean(b) => JsonValue::Boolean(b.value.to_lowercase() == "true"),
             },
             WAILType::Composite(composite) => match composite {
                 WAILCompositeType::Object(o) => {

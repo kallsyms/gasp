@@ -15,7 +15,7 @@ use nom::{
 
 use nom_supreme::final_parser::Location;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -220,7 +220,7 @@ pub enum WAILFileType {
     Application, // .wail - requires main block
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WAILImport {
     pub items: Vec<String>,
     pub path: String,
@@ -232,6 +232,54 @@ impl<'a> WAILParser<'a> {
             WAILFileType::Library
         } else {
             WAILFileType::Application
+        }
+    }
+
+    fn collect_referenced_objects(
+        &self,
+        field_type: &WAILType<'a>,
+        objects: &HashMap<String, WAILDefinition<'a>>,
+        collected_defs: &mut Vec<WAILDefinition<'a>>,
+    ) {
+        match field_type {
+            WAILType::Composite(composite) => match composite {
+                WAILCompositeType::Object(obj) => {
+                    // Check if this object type exists in our objects map
+                    if let Some(def) = objects.get(obj.type_data.type_name) {
+                        if !collected_defs.contains(def) {
+                            collected_defs.push(def.clone());
+
+                            // Recursively check fields of this object
+                            if let Some(fields) = &obj.type_data.field_definitions {
+                                for field in fields {
+                                    self.collect_referenced_objects(
+                                        &field.field_type,
+                                        objects,
+                                        collected_defs,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                WAILCompositeType::Array(array) => {
+                    // Check element type if it exists
+                    if let Some(element_type) = &array.type_data.element_type {
+                        self.collect_referenced_objects(element_type, objects, collected_defs);
+                    }
+                }
+                WAILCompositeType::Union(union) => {
+                    // Check all union members
+                    for member in &union.members {
+                        self.collect_referenced_objects(
+                            &member.field_type,
+                            objects,
+                            collected_defs,
+                        );
+                    }
+                }
+            },
+            _ => (), // Simple types don't reference other objects
         }
     }
 
@@ -260,6 +308,16 @@ impl<'a> WAILParser<'a> {
 
                 // Parse the library file
                 let lib_defs = self.parse_wail_file(lib_content, file_type, false)?;
+                let mut objects: HashMap<String, WAILDefinition> = HashMap::new();
+
+                for lib_def in &lib_defs {
+                    match lib_def {
+                        WAILDefinition::Object(field) => {
+                            objects.insert(field.name.clone(), lib_def.clone());
+                        }
+                        _ => continue,
+                    }
+                }
 
                 // Extract requested definitions
                 for item_name in &import.items {
@@ -269,16 +327,46 @@ impl<'a> WAILParser<'a> {
                             WAILDefinition::Object(field) if &field.name == item_name => {
                                 found = true;
                                 all_imported_defs.push(lib_def.clone());
+
+                                // Collect referenced objects
+                                self.collect_referenced_objects(
+                                    &field.field_type,
+                                    &objects,
+                                    &mut all_imported_defs,
+                                );
                                 break;
                             }
                             WAILDefinition::Template(template) if &template.name == item_name => {
                                 found = true;
                                 all_imported_defs.push(lib_def.clone());
+
+                                // Check input parameters
+                                for param in &template.inputs {
+                                    self.collect_referenced_objects(
+                                        &param.field_type,
+                                        &objects,
+                                        &mut all_imported_defs,
+                                    );
+                                }
+
+                                // Check return type
+                                self.collect_referenced_objects(
+                                    &template.output.field_type,
+                                    &objects,
+                                    &mut all_imported_defs,
+                                );
                                 break;
                             }
                             WAILDefinition::Union(field) if &field.name == item_name => {
                                 found = true;
                                 all_imported_defs.push(lib_def.clone());
+
+                                // Process union members and their referenced types
+                                self.collect_referenced_objects(
+                                    &field.field_type,
+                                    &objects,
+                                    &mut all_imported_defs,
+                                );
                                 break;
                             }
                             _ => continue,
@@ -949,8 +1037,29 @@ impl<'a> WAILParser<'a> {
                 members.push(member_type);
             }
 
+            let mut wail_fields = vec![];
+
+            let reg_borrow = self.registry.borrow();
+
+            for type_data in members.iter() {
+                let field_opt = reg_borrow.get(type_data.type_name());
+
+                match field_opt {
+                    Some(field) => wail_fields.push(field.clone()),
+                    None => {
+                        let field = WAILField {
+                            name: type_data.type_name().to_string(),
+                            field_type: type_data.clone(),
+                            annotations: vec![],
+                        };
+
+                        wail_fields.push(field)
+                    }
+                }
+            }
+
             WAILType::Composite(WAILCompositeType::Union(WAILUnion {
-                members,
+                members: wail_fields,
                 type_data: WAILTypeData {
                     json_type: JsonValue::Object(HashMap::new()),
                     type_name: &complex_type_name.unwrap_or("Union"),
@@ -1500,12 +1609,10 @@ impl<'a> WAILParser<'a> {
                 path
             }
             JsonValidationError::NotMemberOfUnion((field, validation_errors)) => {
-                // Extract the possible types from validation_errors
-                let union_types = validation_errors
-                    .iter()
-                    .map(|(type_name, _)| type_name.clone())
-                    .collect();
-                vec![PathSegment::UnionType(field.clone(), union_types)]
+                vec![PathSegment::UnionType(
+                    field.clone(),
+                    validation_errors.clone(),
+                )]
             }
             JsonValidationError::ObjectMissingRequiredField(field) => {
                 vec![PathSegment::Field(field.clone())]
@@ -1528,13 +1635,19 @@ impl<'a> WAILParser<'a> {
         for (name, field) in reg_borrow.clone().into_iter() {
             match field.field_type.field_definitions() {
                 Some(obj_fields) => {
-                    for field in obj_fields {
-                        if !fields.contains_key(&field.name) {
-                            continue;
-                        }
-                    }
+                    let fieldset: HashSet<String> =
+                        obj_fields.iter().map(|field| field.name.clone()).collect();
 
-                    matches.push(name.clone())
+                    let original_set: HashSet<String> = fields.keys().cloned().collect();
+
+                    let diff = original_set.difference(&fieldset);
+                    let diff_vec: Vec<String> = diff.cloned().collect();
+
+                    if (diff_vec.len() == 1 && diff_vec.first().unwrap() == "_type")
+                        || diff_vec.len() == 0
+                    {
+                        matches.push(name.clone())
+                    }
                 }
                 None => continue,
             }
@@ -1549,7 +1662,6 @@ impl<'a> WAILParser<'a> {
 
     // Helper function to apply fixes based on the path
     pub fn fix_json_value(&self, json: &mut JsonValue, path: &[PathSegment]) -> Result<(), String> {
-        println!("{:?}", path);
         match path.split_first() {
             Some((PathSegment::MissingMetaType, _)) => {
                 if let JsonValue::Object(map) = json {
@@ -1564,7 +1676,6 @@ impl<'a> WAILParser<'a> {
                 }
             }
             Some((PathSegment::ArrayIndex(idx), rest)) => {
-                println!("{:?}", json);
                 if let JsonValue::Array(arr) = json {
                     if let Some(element) = arr.get_mut(*idx) {
                         self.fix_json_value(element, rest)
@@ -1576,87 +1687,123 @@ impl<'a> WAILParser<'a> {
                 }
             }
             Some((PathSegment::Field(field), rest)) => {
-                Err(format!("Missing field {field} from object."))
+                if rest.is_empty() {
+                    Err(format!("Missing field {field} from object."))
+                } else {
+                    if let JsonValue::Object(map) = json {
+                        match map.get_mut(field) {
+                            None => Err(format!("Missing field {field} from object.")),
+                            Some(json2) => self.fix_json_value(json2, rest),
+                        }
+                    } else {
+                        Err("Expected object".to_string())
+                    }
+                }
             }
-            Some((PathSegment::UnionType(field, possible_types), _)) => {
-                // if let JsonValue::Object(map) = json {
+            Some((PathSegment::UnionType(field, validation_errors), _)) => {
+                match json {
+                    JsonValue::Object(map) => {
+                        // Try each possible union type and its validation errors
+                        for (type_name, errors) in validation_errors {
+                            // Clone the object to try fixes without modifying original
+                            let mut test_json = json.clone();
 
-                // }
-                Err(format!("Not attempting to coerce union type."))
+                            // Get a new path from these errors to try fixing
+                            let error_path = self.get_error_location(errors);
+
+                            // Try to fix the validation errors for this type
+                            let res = self.fix_json_value(&mut test_json, &error_path);
+                            if res.is_ok() {
+                                // If successful, apply the changes back to original
+                                *json = test_json;
+                                return Ok(());
+                            }
+                        }
+                        Err("Could not coerce to any union type".to_string())
+                    }
+                    _ => Err("Expected object for union type".to_string()),
+                }
             }
             Some((PathSegment::ExpectedType(field, expected), rest)) => match field {
-                None => match expected.as_str() {
-                    "String" => match json {
-                        JsonValue::Number(n) => {
-                            *json = JsonValue::String(n.to_string());
+                None => {
+                    match expected.as_str() {
+                        "Array" => {
+                            *json = JsonValue::Array(vec![json.to_owned()]);
                             Ok(())
                         }
-                        JsonValue::Boolean(b) => {
-                            *json = JsonValue::String(b.to_string());
-                            Ok(())
-                        }
-                        JsonValue::Null => {
-                            *json = JsonValue::String("null".to_string());
-                            Ok(())
-                        }
-                        JsonValue::String(_) => Ok(()), // Already a string
-                        _ => Err("Cannot convert to string".to_string()),
-                    },
-                    "Number" => match json {
-                        JsonValue::String(s) => {
-                            if let Ok(n) = s.parse::<i64>() {
-                                *json = JsonValue::Number(Number::Integer(n.into()));
-                                Ok(())
-                            } else {
-                                Err("String is not a valid number".to_string())
-                            }
-                        }
-                        JsonValue::Boolean(b) => {
-                            *json =
-                                JsonValue::Number(Number::Integer(if *b { 1 } else { 0 }.into()));
-                            Ok(())
-                        }
-                        JsonValue::Number(_) => Ok(()), // Already a number
-                        _ => Err("Cannot convert to number".to_string()),
-                    },
-                    "Boolean" => match json {
-                        JsonValue::String(s) => match s.to_lowercase().as_str() {
-                            "true" | "1" => {
-                                *json = JsonValue::Boolean(true);
+                        "String" => match json {
+                            JsonValue::Number(n) => {
+                                *json = JsonValue::String(n.to_string());
                                 Ok(())
                             }
-                            "false" | "0" => {
-                                *json = JsonValue::Boolean(false);
+                            JsonValue::Boolean(b) => {
+                                *json = JsonValue::String(b.to_string());
                                 Ok(())
                             }
-                            _ => Err("String is not a valid boolean".to_string()),
+                            JsonValue::Null => {
+                                *json = JsonValue::String("null".to_string());
+                                Ok(())
+                            }
+                            JsonValue::String(_) => Ok(()), // Already a string
+                            _ => Err("Cannot convert to string".to_string()),
                         },
-                        JsonValue::Number(n) => {
-                            if n.is_i64() {
-                                match n.as_i64() {
-                                    0 => {
-                                        *json = JsonValue::Boolean(false);
-                                        Ok(())
-                                    }
-                                    1 => {
-                                        *json = JsonValue::Boolean(true);
-                                        Ok(())
-                                    }
-                                    _ => Err("Number is not 0 or 1".to_string()),
+                        "Number" => match json {
+                            JsonValue::String(s) => {
+                                if let Ok(n) = s.parse::<i64>() {
+                                    *json = JsonValue::Number(Number::Integer(n.into()));
+                                    Ok(())
+                                } else {
+                                    Err("String is not a valid number".to_string())
                                 }
-                            } else {
-                                Err("Cannot convert float to boolean".to_string())
                             }
+                            JsonValue::Boolean(b) => {
+                                *json = JsonValue::Number(Number::Integer(
+                                    if *b { 1 } else { 0 }.into(),
+                                ));
+                                Ok(())
+                            }
+                            JsonValue::Number(_) => Ok(()), // Already a number
+                            _ => Err("Cannot convert to number".to_string()),
+                        },
+                        "Boolean" => match json {
+                            JsonValue::String(s) => match s.to_lowercase().as_str() {
+                                "true" | "1" => {
+                                    *json = JsonValue::Boolean(true);
+                                    Ok(())
+                                }
+                                "false" | "0" => {
+                                    *json = JsonValue::Boolean(false);
+                                    Ok(())
+                                }
+                                _ => Err("String is not a valid boolean".to_string()),
+                            },
+                            JsonValue::Number(n) => {
+                                if n.is_i64() {
+                                    match n.as_i64() {
+                                        0 => {
+                                            *json = JsonValue::Boolean(false);
+                                            Ok(())
+                                        }
+                                        1 => {
+                                            *json = JsonValue::Boolean(true);
+                                            Ok(())
+                                        }
+                                        _ => Err("Number is not 0 or 1".to_string()),
+                                    }
+                                } else {
+                                    Err("Cannot convert float to boolean".to_string())
+                                }
+                            }
+                            JsonValue::Boolean(_) => Ok(()), // Already a bool
+                            _ => Err("Cannot convert to boolean".to_string()),
+                        },
+                        "Null" => {
+                            *json = JsonValue::Null;
+                            Ok(())
                         }
-                        JsonValue::Boolean(_) => Ok(()), // Already a bool
-                        _ => Err("Cannot convert to boolean".to_string()),
-                    },
-                    "Null" => {
-                        *json = JsonValue::Null;
-                        Ok(())
+                        _ => Err("Unrecognized type for conversion".to_string()),
                     }
-                    _ => Err("Unrecognized type for conversion".to_string()),
-                },
+                }
                 Some(field_name) => match json {
                     JsonValue::Object(map) => {
                         if let Some(value) = map.get_mut(field_name) {
@@ -1707,6 +1854,20 @@ impl<'a> WAILParser<'a> {
             .as_ref()
             .unwrap()
             .validate_llm_response(&value, &self.template_registry.borrow())
+    }
+
+    pub fn validate_and_fix(&self, json: &mut JsonValue) -> Result<(), String> {
+        loop {
+            match self.validate_json(&json.to_string()) {
+                Ok(_) => return Ok(()),
+                Err((template, variable, err)) => {
+                    let mut path = self.get_error_location(&err);
+                    path.insert(0, PathSegment::Root((template, variable)));
+
+                    self.fix_json_value(json, &path)?;
+                }
+            }
+        }
     }
 
     pub fn validate(&self) -> (Vec<ValidationWarning>, Vec<ValidationError>) {
@@ -1837,7 +1998,7 @@ impl<'a> WAILParser<'a> {
                     // Validate each member type
                     for member_type in &union.members {
                         self.validate_type(
-                            member_type,
+                            &member_type.field_type,
                             registry,
                             template_name,
                             warnings,
@@ -1893,7 +2054,7 @@ impl<'a> WAILParser<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WAILDefinition<'a> {
     Object(WAILField<'a>),
     Template(WAILTemplateDef<'a>),

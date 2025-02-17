@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
     Object(HashMap<String, JsonValue>),
     Array(Vec<JsonValue>),
@@ -58,7 +58,7 @@ impl fmt::Display for JsonValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Number {
     Integer(i64),
     Float(f64),
