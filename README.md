@@ -15,9 +15,7 @@ In our expereince the ergonomics around tool calling kind of suck right now and 
 
 If you're using OpenRouter (which is great) they choose not to support some platform specific features (understandable) like the "ANY" parameter from Anthropic so you wind up with super verbose output, the occasional no tool call, missing params even when specified in "required" and so we decided to implement this prompt creator and schema validator because what are tool calls other than type interfaces. 
 
-Honestly, [BAML](https://github.com/BoundaryML/baml) is a really sick tool and more feature complete than this, with like people actually paid to work on it, and outside of the minimal needs we have that this was created for you should go use them. 
-
-However, they require you to use their code gen'd inference clients for sending messages to the LLM. That let's them do some really powerful things like validation mid streaming, but you have to be all in on them.
+Honestly, [BAML](https://github.com/BoundaryML/baml) is a really sick tool and more feature complete than this, with like people actually paid to work on it. However, they require you to use their code gen'd inference clients for sending messages to the LLM. That let's them do some really powerful things like validation mid streaming, but you have to be all in on them.
 
 GASP and WAIL let you separate out prompt creation, inference and prompt validation from one another so you can apply GASP to whatever client floats your boat with the trade off that we aren't intending to make this work for every streaming format under the sun (at least I'm not, feel free to contribute!) so it's only applicable to fully generated outputs.
 
