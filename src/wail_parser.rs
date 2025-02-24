@@ -323,6 +323,8 @@ impl<'a> WAILParser<'a> {
                 for item_name in &import.items {
                     let mut found = false;
                     for lib_def in &lib_defs {
+                        println!("{:?}", lib_def.get_name().unwrap());
+
                         match lib_def {
                             WAILDefinition::Object(field) if &field.name == item_name => {
                                 found = true;
@@ -458,6 +460,10 @@ impl<'a> WAILParser<'a> {
                 path: path.to_string(),
             }),
         ))
+    }
+
+    pub fn set_base_path(&mut self, path: PathBuf) {
+        self.base_path = path;
     }
 
     pub fn new(base_path: PathBuf) -> Self {
@@ -905,15 +911,16 @@ impl<'a> WAILParser<'a> {
     }
 
     fn parse_field(&'a self, input: &'a str) -> IResult<&str, WAILField, ErrorTree<&'a str>> {
-        let (input, (name, _, _, (field_type, _), _)) = tuple((
+        let (input, (name, _, _, (field_type, _))) = tuple((
             |i| self.identifier(i),
             char(':'),
             multispace0,
             |i| self.parse_type(i, None),
-            opt(|i| self.parse_comment(i)),
         ))(input)?;
 
         let (input, annotations) = many0(|i| self.parse_annotation(i))(input)?;
+
+        let (input, _) = opt(|i| self.parse_comment(i))(input)?;
 
         Ok((
             input,
@@ -998,29 +1005,28 @@ impl<'a> WAILParser<'a> {
         // Parse first type identifier
         let (input, base_type) = self.identifier(input)?;
         let (input, _) = multispace0(input)?;
-
         // Check if base type is an array
         let (mut input, base_is_array) = opt(tag("[]"))(input)?;
+
+        let (mut input, _) = multispace0(input)?;
 
         // Look for union syntax
         let mut union_members = vec![];
         let mut is_union = false;
 
         while let Ok((remaining, _)) =
-            tuple((char('|'), multispace0::<&str, nom::error::Error<&str>>))(input)
+            tuple((char('|'), multispace0::<&str, ErrorTree<&str>>))(input)
         {
             is_union = true;
-            // Parse type identifier for union member
-            match self.identifier(remaining) {
-                Ok((new_input, type_name)) => {
-                    input = new_input;
+            if let Ok((new_input, type_name)) = self.identifier(remaining) {
+                if let Ok((next_input, _)) = multispace0::<&str, ErrorTree<&str>>(new_input) {
+                    input = next_input;
                     union_members.push(type_name);
+                } else {
+                    break;
                 }
-                Err(_) => break,
-            }
-            match multispace0::<&str, nom::error::Error<&str>>(input) {
-                Ok((new_input, _)) => input = new_input,
-                Err(_) => break,
+            } else {
+                break;
             }
         }
 
@@ -2135,6 +2141,75 @@ mod tests {
                 );
             }
             _ => panic!("Expected object definition"),
+        }
+    }
+
+    #[test]
+    fn test_array_with_annotations() {
+        let input = r#"
+        object Test {
+            items: String[] @description("An array of strings")
+            mix: Number[] @description("Array with numbers") #Comment
+        }
+        "#;
+
+        let test_dir = std::env::current_dir().unwrap();
+        let parser = WAILParser::new(test_dir);
+
+        match parser.parse_wail_file(input.to_string(), WAILFileType::Library, true) {
+            Ok(definitions) => {
+                match &definitions[0] {
+                    WAILDefinition::Object(field) => {
+                        if let WAILType::Composite(WAILCompositeType::Object(obj)) =
+                            &field.field_type
+                        {
+                            let fields = obj.type_data.field_definitions.as_ref().unwrap();
+
+                            // Add debug prints
+                            println!("Number of fields: {}", fields.len());
+                            for (i, field) in fields.iter().enumerate() {
+                                println!(
+                                    "Field {}: {} annotations: {}",
+                                    i,
+                                    field.name,
+                                    field.annotations.len()
+                                );
+                                for ann in &field.annotations {
+                                    println!("  Annotation: {:?}", ann);
+                                }
+                            }
+
+                            // First field test
+                            assert_eq!(fields[0].name, "items");
+                            assert!(matches!(
+                                fields[0].field_type,
+                                WAILType::Composite(WAILCompositeType::Array(_))
+                            ));
+                            assert_eq!(
+                                fields[0].annotations.len(),
+                                1,
+                                "items field should have 1 annotation"
+                            );
+
+                            // Second field test
+                            assert_eq!(fields[1].name, "mix");
+                            assert!(matches!(
+                                fields[1].field_type,
+                                WAILType::Composite(WAILCompositeType::Array(_))
+                            ));
+                            assert_eq!(
+                                fields[1].annotations.len(),
+                                1,
+                                "mix field should have 1 annotation"
+                            );
+                        } else {
+                            panic!("Expected object type");
+                        }
+                    }
+                    _ => panic!("Expected object definition"),
+                }
+            }
+            Err(e) => panic!("Failed to parse: {:?}", e),
         }
     }
 

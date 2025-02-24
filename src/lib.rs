@@ -67,6 +67,11 @@ impl WAILGenerator {
         }
     }
 
+    #[pyo3(text_signature = "(&self, base_dir)")]
+    fn set_base_dir(&mut self, base_dir: String) {
+        self.base_dir = PathBuf::from(base_dir);
+    }
+
     /// Load WAIL schema content
     #[pyo3(text_signature = "($self, content)")]
     fn load_wail(&mut self, content: String) -> PyResult<Option<Py<PyDict>>> {
