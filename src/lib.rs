@@ -94,6 +94,11 @@ impl WAILGenerator {
                         py_dict.set_item("found", found)?;
                         py_dict.set_item("location", format!("{:?}", location))?;
                     }
+                    wail_parser::WAILParseError::UnexpectedKeyword { found, location } => {
+                        py_dict.set_item("error_type", "UnexpectedKeyword")?;
+                        py_dict.set_item("found", found)?;
+                        py_dict.set_item("location", format!("{:?}", location))?;
+                    }
                     wail_parser::WAILParseError::UnexpectedEOF { expected, location } => {
                         py_dict.set_item("error_type", "UnexpectedEOF")?;
                         py_dict.set_item("expected", expected)?;
