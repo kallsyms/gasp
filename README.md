@@ -269,3 +269,7 @@ Name: Alice
 Age: 25
 Interests: coding, AI, hiking
 ```
+
+## Changelog
+
+0.9.0 - Complete parser rewrite to an incremental non recursive parser. All original tests pass but parsing semantics may be slightly different. Considering this a breaking change because there are likely parser edge cases I can't account for.
