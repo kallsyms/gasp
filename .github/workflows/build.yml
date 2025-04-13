@@ -27,7 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          architecture: ${{ matrix.architecture == 'aarch64' && 'x64' || matrix.architecture }}
+          architecture: ${{ matrix.architecture }}
 
       - name: Inject short Python version
         run: echo "PYTHON_VERSION_SHORT=${{ matrix.python-version }}" | sed -E 's/\.([0-9]+)$//' | sed 's/\.//g' >> $GITHUB_ENV
@@ -42,7 +42,6 @@ jobs:
         with:
           toolchain: stable
           override: true
-          target: ${{ matrix.architecture == 'aarch64' && 'aarch64-unknown-linux-gnu' || '' }}
 
       - name: Build wheels
         run: cibuildwheel --output-dir dist/
