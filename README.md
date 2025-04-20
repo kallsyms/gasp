@@ -1,3 +1,5 @@
+# BAML introduced their Modular API (https://docs.boundaryml.com/guide/baml-advanced/modular-api) and it solves the problem I had, and since I am not looking to maintain this library on top of all the other stuff we have going on at Bismuth this is deprecated effective immediately. Seriously I already said their stuff is good please go use them.
+
 # GASP (Gee Another Schema Parser)
 
 GASP is a high-performance Rust-based parser and validator for WAIL (Widely Applicable Interface Language) schemas and JSON responses. It's specifically designed to work with Large Language Models (LLMs) by providing robust error recovery for common LLM response quirks.
