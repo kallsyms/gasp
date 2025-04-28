@@ -1,5 +1,3 @@
-# BAML introduced their Modular API (https://docs.boundaryml.com/guide/baml-advanced/modular-api) and it solves the problem I had, and since I am not looking to maintain this library on top of all the other stuff we have going on at Bismuth this is deprecated effective immediately. Seriously I already said their stuff is good please go use them.
-
 # GASP (Gee Another Schema Parser)
 
 GASP is a high-performance Rust-based parser and validator for WAIL (Widely Applicable Interface Language) schemas and JSON responses. It's specifically designed to work with Large Language Models (LLMs) by providing robust error recovery for common LLM response quirks.
@@ -13,11 +11,13 @@ WAIL (Widely Applicable Interface Language) is a schema language designed for:
 
 ## Why
 
+- Tool calling ergonomics suck
+- Other parsers are weak when you need to do production level engineering
+- Other Parsers Have Good DevX but weak parsing fundamentals
+
 In our experience the ergonomics around tool calling kind of suck right now and in the lowest common denominator settings are down right painful.
 
 If you're using OpenRouter (which is great) they choose not to support some platform specific features (understandable) like the "ANY" parameter from Anthropic so you wind up with super verbose output, the occasional no tool call, missing params even when specified in "required" and so we decided to implement this prompt creator and schema validator because what are tool calls other than type interfaces. 
-
-Honestly, [BAML](https://github.com/BoundaryML/baml) is a really sick tool and more feature complete than this, with like people actually paid to work on it. However, they require you to use their code gen'd inference clients for sending messages to the LLM. That let's them do some really powerful things like validation mid streaming, but you have to be all in on them.
 
 GASP and WAIL let you separate out prompt creation, inference and prompt validation from one another so you can apply GASP to whatever client floats your boat with the trade off that we aren't intending to make this work for every streaming format under the sun (at least I'm not, feel free to contribute!) so it's only applicable to fully generated outputs.
 
