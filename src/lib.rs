@@ -1,9 +1,11 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod json_tok;
 mod json_types;
 mod parser_types;
 mod rd_json_stack_parser;
+mod stream_json_parser;
 mod template_parser;
 mod types;
 mod wail_parser;

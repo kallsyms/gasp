@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+
+use crate::json_tok::Kind;
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
     Object(HashMap<String, JsonValue>),
@@ -109,7 +111,10 @@ pub enum JsonError {
     ExpectedComma,
     InvalidEscape,
     InvalidString,
+    InvalidKey,
     ReservedKeyword(String),
+    StreamingSnapshot(JsonValue),
+    UnexpectedToken(String),
 }
 
 impl fmt::Display for JsonError {

@@ -2350,45 +2350,58 @@ impl<'a> WAILParser<'a> {
         let content = content.trim();
         Ok((input, content.to_string()))
     }
-
     pub fn parse_llm_output(&'a self, input: &'a str) -> Result<JsonValue, String> {
-        // First get the ordered list of variable names from main statements
-        let var_names: Vec<String> = self
+        use std::collections::HashMap; // needed for the one-element object wrap
+
+        /* ----------------------------------------------------------
+         * 1. Extract exactly one <action> … </action> block
+         * -------------------------------------------------------- */
+        let (remainder, inner) = self
+            .parse_json_like_segment(input)
+            .map_err(|_| "Expected exactly one <action>…</action> block".to_owned())?;
+
+        if remainder.contains("<action>") {
+            return Err("Multiple <action> blocks found; only one is allowed".to_owned());
+        }
+
+        /* ----------------------------------------------------------
+         * 2. Parse the JSON (or JSON-ish) payload
+         * -------------------------------------------------------- */
+        let mut jp = JsonParser::new(inner.as_bytes().to_vec());
+        let payload = jp
+            .parse()
+            .map_err(|e| format!("Bad JSON inside <action>: {e}"))?;
+
+        /* ----------------------------------------------------------
+         * 3. Work out what the main block expects
+         * -------------------------------------------------------- */
+        let expected_vars: Vec<String> = self
             .main
             .borrow()
             .as_ref()
-            .unwrap()
-            .statements
-            .iter()
-            .filter_map(|stmt| match stmt {
-                MainStatement::Assignment { variable, .. } => Some(variable.clone()),
-                _ => None,
+            .map(|m| {
+                m.statements
+                    .iter()
+                    .filter_map(|stmt| match stmt {
+                        MainStatement::Assignment { variable, .. } => Some(variable.clone()),
+                        _ => None,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
-        // Parse the JSON-like segments
-        let (_input, segments) = many0(|input| self.parse_json_like_segment(input))(input)
-            .map_err(|e| format!("Failed to parse segments: {:?}", e))?;
-
-        if segments.len() != var_names.len() {
-            return Err(format!(
-                "Found {} JSON segments but expected {} based on template variables",
-                segments.len(),
-                var_names.len()
-            ));
+        match expected_vars.len() {
+            0 => Ok(payload), // no binding → return payload directly
+            1 => {
+                let mut map: HashMap<String, JsonValue> = HashMap::new();
+                map.insert(expected_vars[0].clone(), payload);
+                Ok(JsonValue::Object(map))
+            }
+            _ => Err(
+                "Main block binds multiple variables, but only one <action> block is allowed"
+                    .to_owned(),
+            ),
         }
-
-        // Try to parse each segment and build the map
-        let mut result = HashMap::new();
-        for (var_name, segment) in var_names.into_iter().zip(segments) {
-            let mut parser = JsonParser::new(segment.as_bytes().to_vec());
-            let json_value = parser
-                .parse()
-                .map_err(|e| format!("Failed to parse JSON for {}: {}", var_name, e))?;
-            result.insert(var_name, json_value);
-        }
-
-        Ok(JsonValue::Object(result))
     }
 
     pub fn validate_json(
@@ -3736,127 +3749,87 @@ Return in this format: {{return_type}}"#
 
     #[test]
     fn test_json_segment_parsing() {
-        let schema = r#"
-   template Test() -> String {
-      prompt: """Test"""
-   }
-   main {
-      let result = Test();
-      prompt { {{result}} }
-   }"#;
+        /* -------------------------------------------------
+         * 1. Happy-path: one binding, one <action> fence
+         * ------------------------------------------------*/
+        let schema_single = r#"
+            template Test() -> String { prompt: """Test""" }
+            main {
+                let result = Test();
+                prompt { {{result}} }
+            }
+        "#;
 
         let test_dir = std::env::current_dir().unwrap();
         let parser = WAILParser::new(test_dir);
         parser
-            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .parse_wail_file(schema_single.to_string(), WAILFileType::Application, true)
             .unwrap();
 
-        // Test gasp fence parsing
-        let gasp_fence = r#"
-   Some text before
-   <action>
-   "hello"
-   </action>
-   Some text after
-   "#;
+        let good_output = r#"
+            Some chatter …
+            <action>"hello"</action>
+            More chatter …
+        "#;
+        assert!(parser.parse_llm_output(good_output).is_ok());
 
-        let res = parser.parse_llm_output(gasp_fence);
-        println!("{:?}", res);
-        assert!(res.is_ok());
-        let schema = r#"
-   template Test() -> String {
-      prompt: """Test"""
-   }
-   main {
-      let result = Test();
-      let result2 = Test();
-      prompt { {{result}} {{result2}} }
-   }"#;
+        /* -------------------------------------------------
+         * 2. Error: *two* <action> fences
+         * ------------------------------------------------*/
+        let double_fence = r#"
+            <action>"first"</action>
+            <action>"second"</action>
+        "#;
+        assert!(parser.parse_llm_output(double_fence).is_err());
 
-        let test_dir = std::env::current_dir().unwrap();
-        let parser = WAILParser::new(test_dir);
+        /* -------------------------------------------------
+         * 3. Error: main binds two variables
+         * ------------------------------------------------*/
+        let schema_two_bindings = r#"
+            template Test() -> String { prompt: """Test""" }
+            main {
+                let r1 = Test();
+                let r2 = Test();
+                prompt { {{r1}} {{r2}} }
+            }
+        "#;
+
+        let parser2 = WAILParser::new(std::env::current_dir().unwrap());
+        parser2
+            .parse_wail_file(
+                schema_two_bindings.to_string(),
+                WAILFileType::Application,
+                true,
+            )
+            .unwrap();
+
+        let single_fence = r#"<action>"value"</action>"#;
+        assert!(parser2.parse_llm_output(single_fence).is_err());
+
+        /* -------------------------------------------------
+         * 4. Number / array payloads still OK
+         * ------------------------------------------------*/
+        let number_schema = r#"
+            template Test() -> Number { prompt: """Test""" }
+            main { let n = Test(); prompt { {{n}} } }
+        "#;
         parser
-            .parse_wail_file(schema.to_string(), WAILFileType::Application, true)
+            .parse_wail_file(number_schema.to_string(), WAILFileType::Application, true)
             .unwrap();
-        // Test multiple gasp fences
-        let multiple_fences = r#"
-         First result:
-         <action>
-         "hello"
-         </action>
-         Second result:
-         <action>
-         "world"
-         </action>
-         "#;
 
-        let res = parser.parse_llm_output(multiple_fences);
-        println!("{:?}", res);
-        assert!(res.is_ok());
+        let num_out = r#"<action>43</action>"#;
+        assert!(parser.parse_llm_output(num_out).is_ok());
 
-        // Test mixed traditional and fence
-        let mixed = r#"
-         Fence:
-         <action>
-         "world"
-         </action>
-         <action>
-         "world"
-         </action>
-         dd
-         "#;
-        let res = parser.parse_llm_output(mixed);
-        println!("{:?}", res);
-        assert!(res.is_ok());
-
-        // Test different types in fences
-        let types_schema = r#"
-         template Test() -> Number {
-               prompt: """Test"""
-         }
-         main {
-               let result = Test();
-               prompt { {{result}} }
-         }"#;
-
+        let array_schema = r#"
+            template Test() -> Number[] { prompt: """Test""" }
+            main { let arr = Test(); prompt { {{arr}} } }
+        "#;
         parser
-            .parse_wail_file(types_schema.to_string(), WAILFileType::Application, true)
+            .parse_wail_file(array_schema.to_string(), WAILFileType::Application, true)
             .unwrap();
 
-        let number_fence = r#"
-        <action>
-         43
-        </action>
-         "#;
-
-        let res = parser.parse_llm_output(number_fence);
-        println!("{:?}", res);
-        assert!(res.is_ok());
-
-        let types_schema = r#"
-         template Test() -> Number[] {
-               prompt: """Test"""
-         }
-         main {
-               let result = Test();
-               prompt { {{result}} }
-         }"#;
-
-        parser
-            .parse_wail_file(types_schema.to_string(), WAILFileType::Application, true)
-            .unwrap();
-
-        let array_fence = r#"
-         <action>
-         [1, 2, 3]
-         </action>
-         "#;
-        let res = parser.parse_llm_output(array_fence);
-        println!("{:?}", res);
-        assert!(res.is_ok());
-
-        let result = parser.validate_json(&res.unwrap().to_string());
-        assert!(result.is_ok());
+        let arr_out = r#"<action>[1, 2, 3]</action>"#;
+        assert!(parser.parse_llm_output(arr_out).is_ok());
     }
 
     #[test]
