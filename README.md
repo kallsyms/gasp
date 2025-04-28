@@ -12,6 +12,7 @@ WAIL (Widely Applicable Interface Language) is a schema language designed for:
 ## Why
 
 - Tool calling ergonomics suck
+- Other parsers need you to go all in on their stack, you can drop us between whatever agent framework you use doesn't matter.
 - Other parsers are weak when you need to do production level engineering
 - Other Parsers Have Good DevX but weak parsing fundamentals
 
