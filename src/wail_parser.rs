@@ -1,14 +1,9 @@
+use crate::json_parser::Parser as JsonParser;
 use crate::json_types::{JsonValue, Number};
 use crate::parser_types::*;
-use crate::rd_json_stack_parser::Parser as JsonParser;
 use crate::types::*;
-use nom::{
-    bytes::complete::{tag, take_until},
-    character::complete::multispace0,
-    multi::many0,
-    sequence::delimited,
-    IResult,
-};
+
+use std::sync::Arc;
 
 use nom_supreme::final_parser::Location;
 use std::cell::RefCell;
@@ -127,19 +122,19 @@ fn adjust_indentation(content: &str, target_indent: usize) -> String {
 }
 
 #[derive(Debug)]
-pub struct WAILParser<'a> {
-    registry: RefCell<HashMap<String, WAILField<'a>>>,
-    template_registry: RefCell<HashMap<String, WAILTemplateDef<'a>>>,
-    adhoc_obj_ref_id_counter: RefCell<i64>,
-    adhoc_obj_ids: RefCell<Vec<String>>,
-    adhoc_obj_refs: RefCell<HashMap<String, WAILObject<'a>>>,
-    main: RefCell<Option<WAILMainDef<'a>>>,
+pub struct WAILParser {
+    registry: Arc<RefCell<HashMap<String, WAILField>>>,
+    template_registry: Arc<RefCell<HashMap<String, WAILTemplateDef>>>,
+    adhoc_obj_ref_id_counter: Arc<RefCell<i64>>,
+    adhoc_obj_ids: Arc<RefCell<Vec<String>>>,
+    adhoc_obj_refs: Arc<RefCell<HashMap<String, WAILObject>>>,
+    main: Arc<RefCell<Option<WAILMainDef>>>,
     // Track object instantiations with their variable names
-    object_instances: RefCell<HashMap<String, WAILObjectInstantiation>>,
-    import_chain: RefCell<ImportChain>,
+    object_instances: Arc<RefCell<HashMap<String, WAILObjectInstantiation>>>,
+    import_chain: Arc<RefCell<ImportChain>>,
     base_path: PathBuf,
-    incremental_parser: RefCell<Option<Parser<'a>>>,
-    current_module: RefCell<Vec<String>>,
+    incremental_parser: Arc<RefCell<Option<Parser>>>,
+    current_module: Arc<RefCell<Vec<String>>>,
 }
 
 #[derive(Debug)]
@@ -228,9 +223,9 @@ pub struct WAILImport {
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token<'a> {
-    Identifier(&'a str),
-    String(&'a str),
+pub enum Token {
+    Identifier(String),
+    String(String),
     Number(i64),
     Float(f64),
     OpenBrace,
@@ -247,18 +242,18 @@ pub enum Token<'a> {
     Pipe,
     At,
     Dollar,
-    Keyword(&'a str), // object, template, union, main, let, prompt, etc.
+    Keyword(String), // object, template, union, main, let, prompt, etc.
     Hash,
     TripleQuoteStart,
     TripleQuoteEnd,
-    Whitespace(&'a str),
+    Whitespace(String),
     Newline,
-    TripleQuoteContent(&'a str),
-    Comment(&'a str),
+    TripleQuoteContent(String),
+    Comment(String),
     Eof,
 }
 
-impl<'a> fmt::Display for Token<'a> {
+impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Token::Identifier(s) => write!(f, "{}", s),
@@ -293,8 +288,8 @@ impl<'a> fmt::Display for Token<'a> {
 }
 
 #[derive(Debug)]
-pub struct Tokenizer<'a> {
-    input: &'a str,
+pub struct Tokenizer {
+    input: String,
     position: usize,
     line: usize,
     column: usize,
@@ -303,8 +298,8 @@ pub struct Tokenizer<'a> {
     last_column: usize,
 }
 
-impl<'a> Tokenizer<'a> {
-    pub fn new(input: &'a str) -> Self {
+impl Tokenizer {
+    pub fn new(input: String) -> Self {
         Tokenizer {
             input,
             position: 0,
@@ -313,13 +308,6 @@ impl<'a> Tokenizer<'a> {
             last_position: 0,
             last_line: 1,
             last_column: 1,
-        }
-    }
-
-    pub fn current_location(&self) -> Location {
-        Location {
-            line: self.line,
-            column: self.column,
         }
     }
 
@@ -361,7 +349,7 @@ impl<'a> Tokenizer<'a> {
         self.input[self.position..].chars().next()
     }
 
-    fn peek_n(&self, n: usize) -> Option<&'a str> {
+    fn peek_n(&self, n: usize) -> Option<&str> {
         if self.position + n <= self.input.len() {
             Some(&self.input[self.position..self.position + n])
         } else {
@@ -369,7 +357,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    fn read_triple_quoted_string(&mut self) -> Token<'a> {
+    fn read_triple_quoted_string(&mut self) -> Token {
         // Skip the opening """
         self.advance();
         self.advance();
@@ -386,7 +374,7 @@ impl<'a> Tokenizer<'a> {
             self.advance();
         }
 
-        let content = &self.input[start_pos..self.position];
+        let content = self.input[start_pos..self.position].to_string();
 
         if found_end {
             // Skip the closing """
@@ -400,7 +388,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    fn read_string(&mut self) -> Token<'a> {
+    fn read_string(&mut self) -> Token {
         // Skip the opening quote
         self.advance();
 
@@ -422,7 +410,7 @@ impl<'a> Tokenizer<'a> {
             }
         }
 
-        let content = &self.input[start_pos..self.position];
+        let content = self.input[start_pos..self.position].to_string();
 
         if found_end {
             // Skip the closing quote
@@ -434,7 +422,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    fn read_number(&mut self) -> Token<'a> {
+    fn read_number(&mut self) -> Token {
         let start_pos = self.position;
         let mut is_float = false;
 
@@ -488,7 +476,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    fn read_identifier_or_keyword(&mut self) -> Token<'a> {
+    fn read_identifier_or_keyword(&mut self) -> Token {
         let start_pos = self.position;
 
         while let Some(c) = self.peek() {
@@ -499,16 +487,30 @@ impl<'a> Tokenizer<'a> {
             }
         }
 
-        let text = &self.input[start_pos..self.position];
+        let text = self.input[start_pos..self.position].to_string();
+        let keywords: Vec<String> = vec![
+            "object",
+            "template",
+            "union",
+            "main",
+            "let",
+            "prompt",
+            "import",
+            "from",
+            "template_args",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
-        match text {
-            "object" | "template" | "union" | "main" | "let" | "prompt" | "import" | "from"
-            | "template_args" => Token::Keyword(text),
-            _ => Token::Identifier(text),
+        if keywords.contains(&text) {
+            Token::Keyword(text)
+        } else {
+            Token::Identifier(text)
         }
     }
 
-    fn read_comment(&mut self) -> Token<'a> {
+    fn read_comment(&mut self) -> Token {
         // Skip the #
         self.advance();
 
@@ -521,10 +523,10 @@ impl<'a> Tokenizer<'a> {
             self.advance();
         }
 
-        Token::Comment(&self.input[start_pos..self.position])
+        Token::Comment(self.input[start_pos..self.position].to_string())
     }
 
-    fn read_arrow(&mut self) -> Token<'a> {
+    fn read_arrow(&mut self) -> Token {
         // Skip the -
         self.advance();
 
@@ -540,7 +542,7 @@ impl<'a> Tokenizer<'a> {
             self.read_number()
         }
     }
-    pub fn next_token(&mut self) -> Token<'a> {
+    pub fn next_token(&mut self) -> Token {
         self.save_position();
         if self.position >= self.input.len() {
             return Token::Eof;
@@ -561,7 +563,7 @@ impl<'a> Tokenizer<'a> {
             }
 
             // Return whitespace as a token
-            return Token::Whitespace(&self.input[start_pos..self.position]);
+            return Token::Whitespace(self.input[start_pos..self.position].to_string());
         }
 
         // Check for triple-quoted string
@@ -637,34 +639,34 @@ impl<'a> Tokenizer<'a> {
 }
 
 #[derive(Debug)]
-pub struct Parser<'a> {
-    tokenizer: Tokenizer<'a>,
-    current_token: Token<'a>,
-    peek_token: Token<'a>,
-    registry: &'a RefCell<HashMap<String, WAILField<'a>>>,
-    template_registry: &'a RefCell<HashMap<String, WAILTemplateDef<'a>>>,
-    adhoc_obj_ref_id_counter: &'a RefCell<i64>,
-    adhoc_obj_ids: &'a RefCell<Vec<String>>,
-    adhoc_obj_refs: &'a RefCell<HashMap<String, WAILObject<'a>>>,
-    object_instances: &'a RefCell<HashMap<String, WAILObjectInstantiation>>,
-    main: &'a RefCell<Option<WAILMainDef<'a>>>,
-    import_chain: &'a RefCell<ImportChain>,
+pub struct Parser {
+    tokenizer: Tokenizer,
+    current_token: Token,
+    peek_token: Token,
+    registry: Arc<RefCell<HashMap<String, WAILField>>>,
+    template_registry: Arc<RefCell<HashMap<String, WAILTemplateDef>>>,
+    adhoc_obj_ref_id_counter: Arc<RefCell<i64>>,
+    adhoc_obj_ids: Arc<RefCell<Vec<String>>>,
+    adhoc_obj_refs: Arc<RefCell<HashMap<String, WAILObject>>>,
+    object_instances: Arc<RefCell<HashMap<String, WAILObjectInstantiation>>>,
+    main: Arc<RefCell<Option<WAILMainDef>>>,
+    import_chain: Arc<RefCell<ImportChain>>,
     in_prompt_block: RefCell<bool>,
-    current_module: &'a RefCell<Vec<String>>,
+    current_module: Arc<RefCell<Vec<String>>>,
 }
 
-impl<'a> Parser<'a> {
+impl Parser {
     pub fn new(
-        input: &'a str,
-        registry: &'a RefCell<HashMap<String, WAILField<'a>>>,
-        template_registry: &'a RefCell<HashMap<String, WAILTemplateDef<'a>>>,
-        adhoc_obj_ref_id_counter: &'a RefCell<i64>,
-        adhoc_obj_ids: &'a RefCell<Vec<String>>,
-        adhoc_obj_refs: &'a RefCell<HashMap<String, WAILObject<'a>>>,
-        object_instances: &'a RefCell<HashMap<String, WAILObjectInstantiation>>,
-        main: &'a RefCell<Option<WAILMainDef<'a>>>,
-        import_chain: &'a RefCell<ImportChain>,
-        current_module: &'a RefCell<Vec<String>>,
+        input: String,
+        registry: Arc<RefCell<HashMap<String, WAILField>>>,
+        template_registry: Arc<RefCell<HashMap<String, WAILTemplateDef>>>,
+        adhoc_obj_ref_id_counter: Arc<RefCell<i64>>,
+        adhoc_obj_ids: Arc<RefCell<Vec<String>>>,
+        adhoc_obj_refs: Arc<RefCell<HashMap<String, WAILObject>>>,
+        object_instances: Arc<RefCell<HashMap<String, WAILObjectInstantiation>>>,
+        main: Arc<RefCell<Option<WAILMainDef>>>,
+        import_chain: Arc<RefCell<ImportChain>>,
+        current_module: Arc<RefCell<Vec<String>>>,
     ) -> Self {
         let mut tokenizer = Tokenizer::new(input);
         let current_token = tokenizer.next_token();
@@ -688,7 +690,7 @@ impl<'a> Parser<'a> {
     }
 
     // Update parse_object to better handle fields
-    fn parse_object(&mut self) -> Result<WAILDefinition<'a>, WAILParseError> {
+    fn parse_object(&mut self) -> Result<WAILDefinition, WAILParseError> {
         // Expect "object" keyword
         self.expect_keyword("object")?;
         // Parse object name
@@ -739,7 +741,7 @@ impl<'a> Parser<'a> {
                     value: field.name.clone(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(field.name.clone()),
-                        type_name: "String",
+                        type_name: "String".to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -754,7 +756,7 @@ impl<'a> Parser<'a> {
                 value: "_type".to_string(),
                 type_data: WAILTypeData {
                     json_type: JsonValue::String("_type".to_string()),
-                    type_name: "String",
+                    type_name: "String".to_string(),
                     field_definitions: None,
                     element_type: None,
                 },
@@ -763,7 +765,7 @@ impl<'a> Parser<'a> {
                 value: name.to_string(),
                 type_data: WAILTypeData {
                     json_type: JsonValue::String("_type".to_string()),
-                    type_name: "String",
+                    type_name: "String".to_string(),
                     field_definitions: None,
                     element_type: None,
                 },
@@ -777,7 +779,7 @@ impl<'a> Parser<'a> {
                 value: name.to_string(),
                 type_data: WAILTypeData {
                     json_type: JsonValue::String("_type".to_string()),
-                    type_name: "String",
+                    type_name: "String".to_string(),
                     field_definitions: None,
                     element_type: None,
                 },
@@ -790,7 +792,7 @@ impl<'a> Parser<'a> {
             value: field_map,
             type_data: WAILTypeData {
                 json_type: JsonValue::Object(HashMap::new()), // Placeholder empty object
-                type_name: name,
+                type_name: name.to_string(),
                 field_definitions: Some(fields.clone()),
                 element_type: None,
             },
@@ -815,7 +817,7 @@ impl<'a> Parser<'a> {
     }
 
     // Update the parse_template method to handle triple-quoted strings better
-    fn parse_template(&mut self) -> Result<WAILDefinition<'a>, WAILParseError> {
+    fn parse_template(&mut self) -> Result<WAILDefinition, WAILParseError> {
         // Expect "template" keyword
         self.expect_keyword("template")?;
 
@@ -870,8 +872,10 @@ impl<'a> Parser<'a> {
         self.expect(Token::OpenBrace)?;
 
         // Parse prompt keyword and colon
-        if let Token::Keyword("prompt") = self.current_token {
-            self.next_token();
+        if let Token::Keyword(ref s) = self.current_token {
+            if s == "prompt" {
+                self.next_token();
+            }
         } else {
             return Err(WAILParseError::UnexpectedToken {
                 found: format!("{}", self.current_token),
@@ -882,7 +886,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Colon)?;
 
         // Parse prompt template (triple quoted string)
-        match self.current_token {
+        match self.current_token.clone() {
             Token::TripleQuoteContent(content) => {
                 let prompt_template = {
                     let content_str = content.to_string();
@@ -932,14 +936,16 @@ impl<'a> Parser<'a> {
     fn parse_wail_file(
         &mut self,
         file_type: WAILFileType,
-    ) -> Result<Vec<WAILDefinition<'a>>, WAILParseError> {
+    ) -> Result<Vec<WAILDefinition>, WAILParseError> {
         let mut definitions = Vec::new();
         let mut imports = Vec::new();
 
         self.optional_whitespace();
 
-        // Parse imports first
-        while let Token::Keyword("import") = self.current_token {
+        while let Token::Keyword(ref s) = &self.current_token {
+            if s != "import" {
+                break;
+            }
             let import = self.parse_import()?;
             imports.push(import.clone());
             definitions.push(import);
@@ -952,20 +958,20 @@ impl<'a> Parser<'a> {
 
         // Parse regular definitions
         while self.current_token != Token::Eof {
-            match self.current_token {
-                Token::Keyword("object") => {
+            match self.current_token.clone() {
+                Token::Keyword(kw) if kw == "object".to_string() => {
                     let object = self.parse_object()?;
                     definitions.push(object);
                 }
-                Token::Keyword("template") => {
+                Token::Keyword(kw) if kw == "template".to_string() => {
                     let template = self.parse_template()?;
                     definitions.push(template);
                 }
-                Token::Keyword("union") => {
+                Token::Keyword(kw) if kw == "union".to_string() => {
                     let union = self.parse_union()?;
                     definitions.push(union);
                 }
-                Token::Keyword("main") => {
+                Token::Keyword(kw) if kw == "main".to_string() => {
                     if file_type == WAILFileType::Library {
                         return Err(WAILParseError::UnexpectedToken {
                             found: "main block in library file".to_string(),
@@ -997,7 +1003,7 @@ impl<'a> Parser<'a> {
         Ok(definitions)
     }
 
-    fn resolve_imports(&mut self, imports: &[WAILDefinition<'a>]) -> Result<(), WAILParseError> {
+    fn resolve_imports(&mut self, imports: &[WAILDefinition]) -> Result<(), WAILParseError> {
         for def in imports {
             if let WAILDefinition::Import(import) = def {
                 // Resolve the import path
@@ -1015,21 +1021,18 @@ impl<'a> Parser<'a> {
                         error: e.to_string(),
                     })?;
 
-                // Make the string live for 'a lifetime
-                let lib_content = Box::leak(lib_content.into_boxed_str());
-
                 // Create a new parser for this import with the same shared state
                 let mut import_parser = Parser::new(
-                    lib_content,
-                    self.registry,
-                    self.template_registry,
-                    self.adhoc_obj_ref_id_counter,
-                    self.adhoc_obj_ids,
-                    self.adhoc_obj_refs,
-                    self.object_instances,
-                    self.main,
-                    self.import_chain,
-                    self.current_module,
+                    lib_content.clone(),
+                    self.registry.clone(),
+                    self.template_registry.clone(),
+                    self.adhoc_obj_ref_id_counter.clone(),
+                    self.adhoc_obj_ids.clone(),
+                    self.adhoc_obj_refs.clone(),
+                    self.object_instances.clone(),
+                    self.main.clone(),
+                    self.import_chain.clone(),
+                    self.current_module.clone(),
                 );
 
                 // Parse the library file
@@ -1130,20 +1133,20 @@ impl<'a> Parser<'a> {
     // Helper method to add referenced types
     fn add_referenced_types(
         &self,
-        field_type: &WAILType<'a>,
-        objects: &HashMap<String, WAILDefinition<'a>>,
+        field_type: &WAILType,
+        objects: &HashMap<String, WAILDefinition>,
     ) {
         match field_type {
             WAILType::Composite(composite) => match composite {
                 WAILCompositeType::Object(obj) => {
-                    let type_name = obj.type_data.type_name;
+                    let type_name = obj.type_data.type_name.clone();
 
                     {
                         // If this type exists in objects map and not already in registry
-                        if objects.contains_key(type_name)
-                            && !self.registry.borrow().contains_key(type_name)
+                        if objects.contains_key(&type_name)
+                            && !self.registry.borrow().contains_key(&type_name)
                         {
-                            if let Some(WAILDefinition::Object(field)) = objects.get(type_name) {
+                            if let Some(WAILDefinition::Object(field)) = objects.get(&type_name) {
                                 {
                                     self.registry
                                         .borrow_mut()
@@ -1176,7 +1179,7 @@ impl<'a> Parser<'a> {
     }
 
     // Update other parsing methods that work with newlines and comments
-    fn parse_field(&mut self) -> Result<WAILField<'a>, WAILParseError> {
+    fn parse_field(&mut self) -> Result<WAILField, WAILParseError> {
         // Parse field name
         let name = self.expect_identifier()?;
 
@@ -1196,10 +1199,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn lookup_template_in_registry(
-        &self,
-        name: &str,
-    ) -> Result<WAILTemplateDef<'a>, WAILParseError> {
+    fn lookup_template_in_registry(&self, name: &str) -> Result<WAILTemplateDef, WAILParseError> {
         let mut matches = vec![];
 
         {
@@ -1224,32 +1224,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn lookup_adhoc_obj_in_registry(&self, name: &str) -> Result<WAILObject, WAILParseError> {
-        let mut matches = vec![];
-
-        {
-            for (key, def) in self.adhoc_obj_refs.borrow().iter() {
-                if let Some(actual_name) = key.split('.').last() {
-                    if actual_name == name {
-                        matches.push((key.clone(), def.clone()));
-                    }
-                }
-            }
-        }
-
-        match matches.len() {
-            0 => Err(WAILParseError::SymbolNotFound {
-                name: name.to_string(),
-            }),
-            1 => Ok(matches.remove(0).1),
-            _ => Err(WAILParseError::AmbiguousSymbol {
-                name: name.to_string(),
-                matches: matches.into_iter().map(|(k, _)| k).collect(),
-            }),
-        }
-    }
-
-    fn lookup_symbol_in_registry(&self, name: &str) -> Result<WAILField<'a>, WAILParseError> {
+    fn lookup_symbol_in_registry(&self, name: &str) -> Result<WAILField, WAILParseError> {
         let mut matches = vec![];
 
         {
@@ -1274,7 +1249,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_union(&mut self) -> Result<WAILDefinition<'a>, WAILParseError> {
+    fn parse_union(&mut self) -> Result<WAILDefinition, WAILParseError> {
         // Expect "union" keyword
         self.expect_keyword("union")?;
 
@@ -1350,7 +1325,7 @@ impl<'a> Parser<'a> {
             members,
             type_data: WAILTypeData {
                 json_type: JsonValue::Object(HashMap::new()),
-                type_name: name,
+                type_name: name.to_string(),
                 field_definitions: None,
                 element_type: None,
             },
@@ -1372,7 +1347,7 @@ impl<'a> Parser<'a> {
         Ok(WAILDefinition::Union(field))
     }
 
-    fn parse_main(&mut self) -> Result<WAILMainDef<'a>, WAILParseError> {
+    fn parse_main(&mut self) -> Result<WAILMainDef, WAILParseError> {
         // Check if main block already exists
         if self.main.borrow().is_some() {
             return Err(WAILParseError::DuplicateDefinition {
@@ -1388,9 +1363,13 @@ impl<'a> Parser<'a> {
         self.expect(Token::OpenBrace)?;
 
         // Parse optional template_args
-        let template_args = if matches!(self.current_token, Token::Keyword("template_args")) {
-            self.next_token();
-            self.parse_template_args()?
+        let template_args = if let Token::Keyword(ref s) = self.current_token {
+            if s == "template_args" {
+                self.next_token();
+                self.parse_template_args()?
+            } else {
+                HashMap::new()
+            }
         } else {
             HashMap::new()
         };
@@ -1398,16 +1377,20 @@ impl<'a> Parser<'a> {
         // Parse statements
         let mut statements = Vec::new();
 
-        while !matches!(self.current_token, Token::Keyword("prompt"))
-            && !matches!(self.current_token, Token::CloseBrace)
-        {
-            match self.current_token {
-                Token::Keyword("let") => {
+        let tok = "prompt".to_string();
+        let tok2 = "let".to_string();
+
+        while match self.current_token.clone() {
+            Token::Keyword(s) => s != tok,
+            Token::CloseBrace => false,
+            _ => true,
+        } {
+            match self.current_token.clone() {
+                Token::Keyword(kw) if kw == tok2 => {
                     let statement = self.parse_assignment_statement()?;
                     statements.push(statement);
                 }
                 Token::Identifier(_) => {
-                    // Template call without assignment
                     let template_call = self.parse_template_call()?;
                     statements.push(MainStatement::TemplateCall(template_call));
                     self.expect(Token::Semicolon)?;
@@ -1419,22 +1402,29 @@ impl<'a> Parser<'a> {
                     });
                 }
                 _ => {
-                    // Skip any non-statement tokens
                     self.next_token();
                 }
             }
         }
 
         // Parse prompt block
-        let prompt_str = if matches!(self.current_token, Token::Keyword("prompt")) {
-            self.next_token();
-            self.parse_prompt_block()?
+        let prompt_str = if let Token::Keyword(ref s) = self.current_token {
+            if s == "prompt" {
+                self.next_token();
+                self.parse_prompt_block()?
+            } else {
+                return Err(WAILParseError::UnexpectedToken {
+                    found: format!("Unexpected keyword '{}'", s),
+                    location: self.tokenizer.last_location(),
+                });
+            }
         } else {
             return Err(WAILParseError::UnexpectedToken {
                 found: "Expected prompt block".to_string(),
                 location: self.tokenizer.last_location(),
             });
         };
+
         self.optional_whitespace();
 
         // Expect closing brace
@@ -1512,7 +1502,7 @@ impl<'a> Parser<'a> {
 
     //-------------------------------###########
 
-    fn next_token(&mut self) -> Token<'a> {
+    fn next_token(&mut self) -> Token {
         let result = self.current_token.clone();
         self.current_token = self.peek_token.clone();
 
@@ -1534,11 +1524,7 @@ impl<'a> Parser<'a> {
         result
     }
 
-    fn peek(&self) -> &Token<'a> {
-        &self.peek_token
-    }
-
-    fn expect(&mut self, expected: Token<'a>) -> Result<(), WAILParseError> {
+    fn expect(&mut self, expected: Token) -> Result<(), WAILParseError> {
         if std::mem::discriminant(&self.current_token) == std::mem::discriminant(&expected) {
             self.next_token();
             Ok(())
@@ -1550,10 +1536,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_identifier(&mut self) -> Result<&'a str, WAILParseError> {
+    fn expect_identifier(&mut self) -> Result<String, WAILParseError> {
         self.optional_whitespace();
 
-        match self.current_token {
+        match self.current_token.clone() {
             Token::Identifier(name) => {
                 let result = name;
                 self.next_token();
@@ -1571,7 +1557,7 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_keyword(&mut self, keyword: &str) -> Result<(), WAILParseError> {
-        match self.current_token {
+        match self.current_token.clone() {
             Token::Keyword(k) if k == keyword => {
                 self.next_token();
                 Ok(())
@@ -1583,8 +1569,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_string(&mut self) -> Result<&'a str, WAILParseError> {
-        match self.current_token {
+    fn expect_string(&mut self) -> Result<String, WAILParseError> {
+        match self.current_token.clone() {
             Token::String(s) => {
                 let result = s;
                 self.next_token();
@@ -1597,7 +1583,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_import(&mut self) -> Result<WAILDefinition<'a>, WAILParseError> {
+    fn parse_import(&mut self) -> Result<WAILDefinition, WAILParseError> {
         self.optional_whitespace();
         self.expect_keyword("import")?;
 
@@ -1608,7 +1594,7 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
 
         while self.current_token != Token::CloseBrace {
-            match self.current_token {
+            match self.current_token.clone() {
                 Token::Identifier(name) => {
                     items.push(name.to_string());
                     self.next_token();
@@ -1645,7 +1631,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_type(&mut self) -> Result<WAILType<'a>, WAILParseError> {
+    fn parse_type(&mut self) -> Result<WAILType, WAILParseError> {
         // Check for adhoc object type (opening brace without a type name)
         if matches!(self.current_token, Token::OpenBrace) {
             return self.parse_adhoc_object_type();
@@ -1665,11 +1651,8 @@ impl<'a> Parser<'a> {
 
         // Check for union type with pipe operator
         let mut union_members = Vec::new();
-        let mut is_union = false;
 
         if matches!(self.current_token, Token::Pipe) {
-            is_union = true;
-
             // Create base type value for first union member
             let base_type_val = self.create_type_value(base_type, is_array)?;
             union_members.push(base_type_val);
@@ -1712,7 +1695,7 @@ impl<'a> Parser<'a> {
                 members: wail_fields,
                 type_data: WAILTypeData {
                     json_type: JsonValue::Object(HashMap::new()),
-                    type_name: "Union", // Default name
+                    type_name: "Union".to_string(), // Default name
                     field_definitions: None,
                     element_type: None,
                 },
@@ -1731,7 +1714,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_adhoc_object_type(&mut self) -> Result<WAILType<'a>, WAILParseError> {
+    fn parse_adhoc_object_type(&mut self) -> Result<WAILType, WAILParseError> {
         // Generate a unique ID for the adhoc object
         let adhoc_id = {
             let mut counter = self.adhoc_obj_ref_id_counter.borrow_mut();
@@ -1774,7 +1757,7 @@ impl<'a> Parser<'a> {
                     value: field.name.clone(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(field.name.clone()),
-                        type_name: "String",
+                        type_name: "String".to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -1786,7 +1769,7 @@ impl<'a> Parser<'a> {
         self.adhoc_obj_ids.borrow_mut().push(adhoc_id.clone());
 
         // Create the adhoc object
-        let adhoc_type_name = Box::leak(adhoc_id.clone().into_boxed_str());
+        let adhoc_type_name = adhoc_id.clone();
         let object = WAILObject {
             value: field_map,
             type_data: WAILTypeData {
@@ -1818,40 +1801,44 @@ impl<'a> Parser<'a> {
 
     fn create_type_value(
         &self,
-        type_name: &'a str,
+        type_name: String,
         is_array: bool,
-    ) -> Result<WAILType<'a>, WAILParseError> {
+    ) -> Result<WAILType, WAILParseError> {
         // Create inner type based on name
-        let inner_type = match type_name {
-            "String" => WAILType::Simple(WAILSimpleType::String(WAILString {
-                value: String::new(),
-                type_data: WAILTypeData {
-                    json_type: JsonValue::String(String::new()),
-                    type_name: type_name,
-                    field_definitions: None,
-                    element_type: None,
-                },
-            })),
-            "Number" => {
+        let inner_type = match type_name.clone() {
+            tn if tn == "String".to_string() => {
+                WAILType::Simple(WAILSimpleType::String(WAILString {
+                    value: String::new(),
+                    type_data: WAILTypeData {
+                        json_type: JsonValue::String(String::new()),
+                        type_name: type_name.to_string(),
+                        field_definitions: None,
+                        element_type: None,
+                    },
+                }))
+            }
+            tn if tn == "Number".to_string() => {
                 WAILType::Simple(WAILSimpleType::Number(WAILNumber::Integer(WAILInteger {
                     value: 0,
                     type_data: WAILTypeData {
                         json_type: JsonValue::Number(Number::Integer(0)),
-                        type_name: type_name,
+                        type_name: type_name.to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
                 })))
             }
-            "Boolean" => WAILType::Simple(WAILSimpleType::Boolean(WAILBoolean {
-                value: "false".to_string(),
-                type_data: WAILTypeData {
-                    json_type: JsonValue::Boolean(false),
-                    type_name: type_name,
-                    field_definitions: None,
-                    element_type: None,
-                },
-            })),
+            tn if tn == "Boolean".to_string() => {
+                WAILType::Simple(WAILSimpleType::Boolean(WAILBoolean {
+                    value: "false".to_string(),
+                    type_data: WAILTypeData {
+                        json_type: JsonValue::Boolean(false),
+                        type_name: type_name.to_string(),
+                        field_definitions: None,
+                        element_type: None,
+                    },
+                }))
+            }
             // For other types, check if it's registered or assume it's an object/custom type
             _ => match self.lookup_symbol_in_registry(&type_name) {
                 Ok(field) => field.field_type.clone(),
@@ -1861,7 +1848,7 @@ impl<'a> Parser<'a> {
                         value: HashMap::new(),
                         type_data: WAILTypeData {
                             json_type: JsonValue::Object(HashMap::new()),
-                            type_name: type_name,
+                            type_name: type_name.to_string(),
                             field_definitions: None,
                             element_type: None,
                         },
@@ -1876,7 +1863,7 @@ impl<'a> Parser<'a> {
                 values: Vec::new(),
                 type_data: WAILTypeData {
                     json_type: JsonValue::Array(Vec::new()),
-                    type_name: "Array",
+                    type_name: "Array".to_string(),
                     field_definitions: None,
                     element_type: Some(Box::new(inner_type)),
                 },
@@ -1893,17 +1880,12 @@ impl<'a> Parser<'a> {
             self.next_token();
 
             // Parse annotation name
-            match self.current_token {
-                Token::Identifier("description") => {
+            match &self.current_token {
+                Token::Identifier(s) if s == "description" => {
                     self.next_token();
 
-                    // Expect opening parenthesis
                     self.expect(Token::OpenParen)?;
-
-                    // Parse string literal
                     let desc = self.expect_string()?;
-
-                    // Expect closing parenthesis
                     self.expect(Token::CloseParen)?;
 
                     annotations.push(WAILAnnotation::Description(desc.to_string()));
@@ -1921,11 +1903,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comment(&mut self) -> Result<String, WAILParseError> {
-        match self.current_token {
+        match self.current_token.clone() {
             Token::Hash => {
                 self.next_token(); // Skip the # token
 
-                match self.current_token {
+                match self.current_token.clone() {
                     Token::Comment(comment) => {
                         let result = comment.to_string();
                         self.next_token();
@@ -1941,7 +1923,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_parameter(&mut self) -> Result<WAILField<'a>, WAILParseError> {
+    fn parse_parameter(&mut self) -> Result<WAILField, WAILParseError> {
         // Parse parameter name
         let name = self.expect_identifier()?;
 
@@ -1958,7 +1940,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_template_args(&mut self) -> Result<HashMap<String, WAILType<'a>>, WAILParseError> {
+    fn parse_template_args(&mut self) -> Result<HashMap<String, WAILType>, WAILParseError> {
         let mut args = HashMap::new();
 
         // Expect opening brace
@@ -2033,6 +2015,8 @@ impl<'a> Parser<'a> {
         if let Some(field) = registry.get(&template_call.template_name) {
             if let WAILType::Composite(WAILCompositeType::Object(_)) = &field.field_type {
                 // This is an object instantiation
+
+                drop(registry);
 
                 // Expect semicolon
                 self.expect(Token::Semicolon)?;
@@ -2136,7 +2120,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_template_argument(&mut self) -> Result<TemplateArgument, WAILParseError> {
-        match self.current_token {
+        match self.current_token.clone() {
             Token::Dollar => {
                 // Template argument reference with $ prefix
                 self.next_token();
@@ -2150,9 +2134,9 @@ impl<'a> Parser<'a> {
 
                 {
                     // Check if it's an object instance reference
-                    if self.object_instances.borrow().contains_key(name) {
+                    if self.object_instances.borrow().contains_key(&name) {
                         Ok(TemplateArgument::ObjectRef(name.to_string()))
-                    } else if self.registry.borrow().contains_key(name) {
+                    } else if self.registry.borrow().contains_key(&name) {
                         // Check if it's a type reference
                         Ok(TemplateArgument::TypeRef(name.to_string()))
                     } else {
@@ -2209,7 +2193,7 @@ impl<'a> Parser<'a> {
                                 value: field.name.clone(),
                                 type_data: WAILTypeData {
                                     json_type: JsonValue::String(field.name.clone()),
-                                    type_name: "String",
+                                    type_name: "String".to_string(),
                                     field_definitions: None,
                                     element_type: None,
                                 },
@@ -2237,20 +2221,20 @@ impl<'a> Parser<'a> {
     }
 }
 
-impl<'a> WAILParser<'a> {
+impl WAILParser {
     pub fn new(base_path: PathBuf) -> Self {
         Self {
-            registry: RefCell::new(HashMap::new()),
-            template_registry: RefCell::new(HashMap::new()),
-            adhoc_obj_ref_id_counter: RefCell::new(0),
-            adhoc_obj_ids: RefCell::new(Vec::new()),
-            adhoc_obj_refs: RefCell::new(HashMap::new()),
-            main: RefCell::new(None),
-            object_instances: RefCell::new(HashMap::new()),
-            import_chain: RefCell::new(ImportChain::new(base_path.clone())),
+            registry: Arc::new(RefCell::new(HashMap::new())),
+            template_registry: Arc::new(RefCell::new(HashMap::new())),
+            adhoc_obj_ref_id_counter: Arc::new(RefCell::new(0)),
+            adhoc_obj_ids: Arc::new(RefCell::new(Vec::new())),
+            adhoc_obj_refs: Arc::new(RefCell::new(HashMap::new())),
+            main: Arc::new(RefCell::new(None)),
+            object_instances: Arc::new(RefCell::new(HashMap::new())),
+            import_chain: Arc::new(RefCell::new(ImportChain::new(base_path.clone()))),
             base_path: base_path.clone(),
-            incremental_parser: RefCell::new(None),
-            current_module: RefCell::new(vec![]),
+            incremental_parser: Arc::new(RefCell::new(None)),
+            current_module: Arc::new(RefCell::new(vec![])),
         }
     }
 
@@ -2289,7 +2273,7 @@ impl<'a> WAILParser<'a> {
     }
 
     pub fn prepare_prompt(
-        &'a self,
+        &self,
         template_arg_values: Option<&HashMap<String, JsonValue>>,
     ) -> String {
         let main = self.main.borrow();
@@ -2304,55 +2288,47 @@ impl<'a> WAILParser<'a> {
         .unwrap()
     }
 
-    pub fn incremental_parser(&'a self, input: &'a str) -> Parser<'a> {
+    pub fn incremental_parser(&self, input: String) -> Parser {
         Parser::new(
             input,
-            &self.registry,
-            &self.template_registry,
-            &self.adhoc_obj_ref_id_counter,
-            &self.adhoc_obj_ids,
-            &self.adhoc_obj_refs,
-            &self.object_instances,
-            &self.main,
-            &self.import_chain,
-            &self.current_module,
+            self.registry.clone(),
+            self.template_registry.clone(),
+            self.adhoc_obj_ref_id_counter.clone(),
+            self.adhoc_obj_ids.clone(),
+            self.adhoc_obj_refs.clone(),
+            self.object_instances.clone(),
+            self.main.clone(),
+            self.import_chain.clone(),
+            self.current_module.clone(),
         )
     }
 
-    fn parse_json_like_segment(&'a self, input: &'a str) -> IResult<&'a str, String> {
-        let (input, _) = multispace0(input)?;
+    pub fn parse_json_like_segment(&self, input: &str) -> Result<(String, String), String> {
+        let trimmed = input.trim_start();
 
-        if input.is_empty() {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
+        if trimmed.is_empty() {
+            return Err("Unexpected EOF while parsing".to_string());
         }
 
-        // Find positions of `gasp` fence and JSON object in the input.
-        let result_pos = input.find("<action>");
+        let start_tag = "<action>";
+        let end_tag = "</action>";
 
-        match result_pos {
-            Some(_) => self.parse_result_block(input), // Only <action> block is present.
-            None => Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            ))), // Neither pattern is found.
+        let start = trimmed.find(start_tag).ok_or("Missing <action> tag")?;
+        let end = trimmed.find(end_tag).ok_or("Missing </action> tag")?;
+
+        if end <= start {
+            return Err("Malformed <action> block".to_string());
         }
+
+        let content_start = start + start_tag.len();
+        let content = trimmed[content_start..end].trim().to_string();
+
+        let remainder = trimmed[end + end_tag.len()..].to_string();
+
+        Ok((remainder, content))
     }
 
-    /// Parse a <action></action> fenced block.
-    fn parse_result_block(&'a self, input: &'a str) -> IResult<&'a str, String> {
-        let (input, _) = take_until("<action>")(input)?;
-        let (input, content) =
-            delimited(tag("<action>"), take_until("</action>"), tag("</action>"))(input)?;
-
-        let content = content.trim();
-        Ok((input, content.to_string()))
-    }
-    pub fn parse_llm_output(&'a self, input: &'a str) -> Result<JsonValue, String> {
-        use std::collections::HashMap; // needed for the one-element object wrap
-
+    pub fn parse_llm_output(&self, input: &str) -> Result<JsonValue, String> {
         /* ----------------------------------------------------------
          * 1. Extract exactly one <action> … </action> block
          * -------------------------------------------------------- */
@@ -2367,9 +2343,9 @@ impl<'a> WAILParser<'a> {
         /* ----------------------------------------------------------
          * 2. Parse the JSON (or JSON-ish) payload
          * -------------------------------------------------------- */
-        let mut jp = JsonParser::new(inner.as_bytes().to_vec());
+        let mut jp = JsonParser::default();
         let payload = jp
-            .parse()
+            .parse(inner.as_bytes().to_vec())
             .map_err(|e| format!("Bad JSON inside <action>: {e}"))?;
 
         /* ----------------------------------------------------------
@@ -2408,8 +2384,8 @@ impl<'a> WAILParser<'a> {
         &self,
         json: &str,
     ) -> Result<(), (String, Option<String>, JsonValidationError)> {
-        let mut parser = JsonParser::new(json.as_bytes().to_vec());
-        let value = parser.parse().map_err(|e| {
+        let mut parser = JsonParser::default();
+        let value = parser.parse(json.as_bytes().to_vec()).map_err(|e| {
             (
                 "".to_string(),
                 None,
@@ -2504,12 +2480,12 @@ impl<'a> WAILParser<'a> {
                     }
                 }
             }
-            Some((PathSegment::UnionType(field, validation_errors), _)) => {
+            Some((PathSegment::UnionType(_field, validation_errors), _)) => {
                 match json {
                     JsonValue::Object(map) => {
                         println!("{:?}", map.keys());
                         // Try each possible union type and its validation errors
-                        for (type_name, errors) in validation_errors {
+                        for (_type_name, errors) in validation_errors {
                             // Clone the object to try fixes without modifying original
                             let mut test_json = json.clone();
 
@@ -2773,60 +2749,7 @@ impl<'a> WAILParser<'a> {
         }
     }
 
-    fn lookup_template_in_registry(
-        &self,
-        name: &str,
-    ) -> Result<WAILTemplateDef<'a>, WAILParseError> {
-        let mut matches = vec![];
-
-        {
-            for (key, def) in self.template_registry.borrow().iter() {
-                if let Some(actual_name) = key.split('.').last() {
-                    if actual_name == name {
-                        matches.push((key.clone(), def.clone()));
-                    }
-                }
-            }
-        }
-
-        match matches.len() {
-            0 => Err(WAILParseError::SymbolNotFound {
-                name: name.to_string(),
-            }),
-            1 => Ok(matches.remove(0).1),
-            _ => Err(WAILParseError::AmbiguousSymbol {
-                name: name.to_string(),
-                matches: matches.into_iter().map(|(k, _)| k).collect(),
-            }),
-        }
-    }
-
-    fn lookup_adhoc_obj_in_registry(&self, name: &str) -> Result<WAILObject, WAILParseError> {
-        let mut matches = vec![];
-
-        {
-            for (key, def) in self.adhoc_obj_refs.borrow().iter() {
-                if let Some(actual_name) = key.split('.').last() {
-                    if actual_name == name {
-                        matches.push((key.clone(), def.clone()));
-                    }
-                }
-            }
-        }
-
-        match matches.len() {
-            0 => Err(WAILParseError::SymbolNotFound {
-                name: name.to_string(),
-            }),
-            1 => Ok(matches.remove(0).1),
-            _ => Err(WAILParseError::AmbiguousSymbol {
-                name: name.to_string(),
-                matches: matches.into_iter().map(|(k, _)| k).collect(),
-            }),
-        }
-    }
-
-    fn lookup_symbol_in_registry(&self, name: &str) -> Result<WAILField<'a>, WAILParseError> {
+    fn lookup_symbol_in_registry(&self, name: &str) -> Result<WAILField, WAILParseError> {
         let mut matches = vec![];
 
         {
@@ -2892,61 +2815,13 @@ impl<'a> WAILParser<'a> {
         (warnings, errors)
     }
 
-    fn collect_referenced_objects(
-        &self,
-        field_type: &WAILType<'a>,
-        objects: &HashMap<String, WAILDefinition<'a>>,
-        collected_defs: &mut Vec<WAILDefinition<'a>>,
-    ) {
-        match field_type {
-            WAILType::Composite(composite) => match composite {
-                WAILCompositeType::Object(obj) => {
-                    // Check if this object type exists in our objects map
-                    if let Some(def) = objects.get(obj.type_data.type_name) {
-                        if !collected_defs.contains(def) {
-                            collected_defs.push(def.clone());
-
-                            // Recursively check fields of this object
-                            if let Some(fields) = &obj.type_data.field_definitions {
-                                for field in fields {
-                                    self.collect_referenced_objects(
-                                        &field.field_type,
-                                        objects,
-                                        collected_defs,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                WAILCompositeType::Array(array) => {
-                    // Check element type if it exists
-                    if let Some(element_type) = &array.type_data.element_type {
-                        self.collect_referenced_objects(element_type, objects, collected_defs);
-                    }
-                }
-                WAILCompositeType::Union(union) => {
-                    // Check all union members
-                    for member in &union.members {
-                        self.collect_referenced_objects(
-                            &member.field_type,
-                            objects,
-                            collected_defs,
-                        );
-                    }
-                }
-            },
-            _ => (), // Simple types don't reference other objects
-        }
-    }
-
     // Add this method to use our token-based parser
     pub fn parse_wail_file_with_tokens(
-        &'a self,
+        &self,
         input_string: String,
         file_type: WAILFileType,
         clear: bool,
-    ) -> Result<Vec<WAILDefinition<'a>>, WAILParseError> {
+    ) -> Result<Vec<WAILDefinition>, WAILParseError> {
         let input: &str = Box::leak(Box::new(input_string));
 
         if clear {
@@ -2958,7 +2833,7 @@ impl<'a> WAILParser<'a> {
             self.adhoc_obj_refs.replace(HashMap::new());
         }
 
-        let mut parser = self.incremental_parser(input);
+        let mut parser = self.incremental_parser(input.to_string());
 
         let definitions = parser.parse_wail_file(file_type)?;
 
@@ -2967,26 +2842,26 @@ impl<'a> WAILParser<'a> {
 
     // Replace the original parse_wail_file method to use our token-based implementation
     pub fn parse_wail_file(
-        &'a self,
+        &self,
         input_string: String,
         file_type: WAILFileType,
         clear: bool,
-    ) -> Result<Vec<WAILDefinition<'a>>, WAILParseError> {
+    ) -> Result<Vec<WAILDefinition>, WAILParseError> {
         self.parse_wail_file_with_tokens(input_string, file_type, clear)
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WAILDefinition<'a> {
-    Object(WAILField<'a>),
-    Template(WAILTemplateDef<'a>),
-    Union(WAILField<'a>),
-    Main(WAILMainDef<'a>),
+pub enum WAILDefinition {
+    Object(WAILField),
+    Template(WAILTemplateDef),
+    Union(WAILField),
+    Main(WAILMainDef),
     Comment(String),
     Import(WAILImport),
 }
 
-impl<'a> WAILDefinition<'a> {
+impl WAILDefinition {
     fn get_name(&self) -> Option<&str> {
         match self {
             WAILDefinition::Object(field) => Some(&field.name),
@@ -3023,7 +2898,6 @@ pub enum ValidationError {
 // Add test that tries parsing a basic object
 #[cfg(test)]
 mod tests {
-    use std::hash::Hash;
 
     use super::*;
 
@@ -3036,7 +2910,7 @@ mod tests {
 
         let test_dir = std::env::current_dir().unwrap();
         let parser = WAILParser::new(test_dir);
-        let mut incremental = parser.incremental_parser(input);
+        let mut incremental = parser.incremental_parser(input.to_string());
 
         let object_def = incremental.parse_object().unwrap();
 
@@ -3130,7 +3004,7 @@ mod tests {
     fn test_parse_template() {
         // First create a parser
         let test_dir = std::env::current_dir().unwrap();
-        let mut parser = WAILParser::new(test_dir);
+        let parser = WAILParser::new(test_dir);
 
         // Create and register the DateInfo type
         let date_info_fields = vec![
@@ -3141,7 +3015,7 @@ mod tests {
                         value: 0,
                         type_data: WAILTypeData {
                             json_type: JsonValue::Number(Number::Integer(0)),
-                            type_name: "Number",
+                            type_name: "Number".to_string(),
                             field_definitions: None,
                             element_type: None,
                         },
@@ -3155,7 +3029,7 @@ mod tests {
                     value: String::new(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(String::new()),
-                        type_name: "String",
+                        type_name: "String".to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -3168,7 +3042,7 @@ mod tests {
             value: HashMap::new(),
             type_data: WAILTypeData {
                 json_type: JsonValue::Object(HashMap::new()),
-                type_name: "DateInfo",
+                type_name: "DateInfo".to_string(),
                 field_definitions: Some(date_info_fields),
                 element_type: None,
             },
@@ -3197,7 +3071,7 @@ mod tests {
             """
       }"#;
 
-        let mut incremental = parser.incremental_parser(input);
+        let mut incremental = parser.incremental_parser(input.to_string());
 
         let template_def = incremental.parse_template().unwrap();
 
@@ -3248,7 +3122,7 @@ mod tests {
         let test_dir = std::env::current_dir().unwrap();
         let parser = WAILParser::new(test_dir);
 
-        let mut incremental = parser.incremental_parser(input);
+        let mut incremental = parser.incremental_parser(input.to_string());
         let template_def = incremental.parse_template().unwrap();
 
         match template_def {
@@ -3308,7 +3182,7 @@ mod tests {
                         value: 0,
                         type_data: WAILTypeData {
                             json_type: JsonValue::Number(Number::Integer(0)),
-                            type_name: "Number",
+                            type_name: "Number".to_string(),
                             field_definitions: None,
                             element_type: None,
                         },
@@ -3322,7 +3196,7 @@ mod tests {
                     value: String::new(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(String::new()),
-                        type_name: "String",
+                        type_name: "String".to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -3335,7 +3209,7 @@ mod tests {
             value: HashMap::new(),
             type_data: WAILTypeData {
                 json_type: JsonValue::Object(HashMap::new()),
-                type_name: "DateInfo",
+                type_name: "DateInfo".to_string(),
                 field_definitions: Some(fields),
                 element_type: None,
             },
@@ -3360,7 +3234,7 @@ mod tests {
                     value: String::new(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(String::new()),
-                        type_name: "String",
+                        type_name: "String".to_string(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -3589,7 +3463,7 @@ Return in this format: {{return_type}}"#
         assert!(prompt.contains("-- OR --"));
 
         // Verify validation passes
-        let (warnings, errors) = parser.validate();
+        let (_warnings, errors) = parser.validate();
         assert!(
             errors.is_empty(),
             "Unexpected validation errors: {:?}",
@@ -3616,7 +3490,7 @@ Return in this format: {{return_type}}"#
       }"#;
 
         // Use incremental parser for template
-        let mut incremental = parser.incremental_parser(input);
+        let mut incremental = parser.incremental_parser(input.to_string());
         incremental.parse_template().unwrap();
 
         // Now validate - should get errors for undefined types and warning for no main block
@@ -3646,11 +3520,11 @@ Return in this format: {{return_type}}"#
       }"#;
 
         // Use incremental parser for object
-        let mut incremental = parser.incremental_parser(type_def);
+        let mut incremental = parser.incremental_parser(type_def.to_string());
         incremental.parse_object().unwrap();
 
         // Validate again - should now get a typo warning for DataInput vs DataInputs
-        let (warnings, errors) = parser.validate();
+        let (warnings, _errors) = parser.validate();
         assert!(warnings.iter().any(|w| matches!(w,
               ValidationWarning::PossibleTypo {
                  type_name,

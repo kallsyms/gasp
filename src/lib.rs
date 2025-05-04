@@ -1,23 +1,53 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod json_parser;
+mod json_sax_scanner;
 mod json_tok;
 mod json_types;
 mod parser_types;
-mod rd_json_stack_parser;
-mod stream_json_parser;
+mod tag_finder;
 mod template_parser;
 mod types;
 mod wail_parser;
 
+use json_parser::StreamParser;
+use once_cell::sync::OnceCell;
 use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString};
 use pyo3::Python;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use types::JsonValidationError;
-use wail_parser::WAILFileType;
+use wail_parser::{WAILFileType, WAILParser};
 
 use crate::json_types::{JsonValue, Number};
+
+fn to_py(py: Python, value: &JsonValue) -> PyObject {
+    match value {
+        JsonValue::Object(map) => {
+            let dict = PyDict::new(py);
+            for (k, v) in map {
+                dict.set_item(k, json_value_to_py_object(py, v)).unwrap();
+            }
+            dict.into()
+        }
+        JsonValue::Array(arr) => {
+            let list = PyList::empty(py);
+            for item in arr {
+                list.append(json_value_to_py_object(py, item)).unwrap();
+            }
+            list.into()
+        }
+        JsonValue::String(s) => s.into_py(py),
+        JsonValue::Number(n) => match n {
+            Number::Integer(i) => i.into_py(py),
+            Number::Float(f) => f.into_py(py),
+        },
+        JsonValue::Boolean(b) => b.into_py(py),
+        JsonValue::Null => py.None(),
+    }
+}
 
 fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
     match value {
@@ -45,16 +75,21 @@ fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
     }
 }
 
-/// Python wrapper for WAIL validation
-#[pyclass]
+// Python wrapper for WAIL validation
+// Long–lived engine that loads one WAIL schema and
+// lets you build prompts, stream/validate LLM output, etc.
+#[pyclass(name = "GASPEngine", unsendable)]
 #[derive(Debug)]
-struct WAILGenerator {
+struct GASPEngine {
     wail_content: String,
     base_dir: PathBuf,
+    sp: Option<StreamParser>,
+    last_val: Option<JsonValue>,
+    parser: OnceCell<Box<WAILParser>>,
 }
 
 #[pymethods]
-impl WAILGenerator {
+impl GASPEngine {
     #[new]
     #[pyo3(text_signature = "(base_dir=None)")]
     fn new(base_dir: Option<String>) -> Self {
@@ -63,9 +98,17 @@ impl WAILGenerator {
             None => std::env::current_dir().unwrap(),
         };
 
+        let cell = OnceCell::new();
+
+        cell.set(Box::new(wail_parser::WAILParser::new(dir.clone())))
+            .expect("Failed to set OnceCell");
+
         Self {
             wail_content: String::new(),
             base_dir: dir,
+            sp: None,
+            last_val: None,
+            parser: cell,
         }
     }
 
@@ -76,18 +119,20 @@ impl WAILGenerator {
 
     /// Load WAIL schema content
     #[pyo3(text_signature = "($self, content)")]
-    fn load_wail(&mut self, content: String) -> PyResult<Option<Py<PyDict>>> {
+    fn load_schema(&mut self, content: String) -> PyResult<Option<Py<PyDict>>> {
         use pyo3::types::PyDict;
         use pyo3::Python;
 
         self.wail_content = content;
 
-        let parser = wail_parser::WAILParser::new(self.base_dir.clone());
-        let res =
-            parser.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true);
+        let res = self.parser.get().unwrap().parse_wail_file(
+            self.wail_content.clone(),
+            WAILFileType::Application,
+            true,
+        );
 
         match res {
-            Ok(_) => Ok(None),
+            Ok(x) => Ok(None),
             Err(e) => Python::with_gil(|py| {
                 let py_dict = PyDict::new(py);
                 match e {
@@ -170,7 +215,7 @@ impl WAILGenerator {
     }
 
     #[pyo3(text_signature = "($self, **kwargs)", signature = (**kwargs))]
-    fn get_prompt(
+    fn build_prompt(
         &self,
         kwargs: Option<&PyDict>,
     ) -> PyResult<(Option<String>, Vec<String>, Vec<String>)> {
@@ -269,7 +314,7 @@ impl WAILGenerator {
     }
 
     #[pyo3(text_signature = "($self, llm_output)")]
-    fn parse_llm_output(&self, llm_output: String) -> PyResult<PyObject> {
+    fn parse_output(&self, llm_output: String) -> PyResult<PyObject> {
         // Do all JSON parsing and validation outside the GIL
         let parser = wail_parser::WAILParser::new(self.base_dir.clone());
 
@@ -298,7 +343,7 @@ impl WAILGenerator {
 
     /// Validate the loaded WAIL schema and the LLM output against the schema
     #[pyo3(text_signature = "($self)")]
-    fn validate_wail(&self) -> PyResult<(Vec<String>, Vec<String>)> {
+    fn validate_schema(&self) -> PyResult<(Vec<String>, Vec<String>)> {
         let parser = wail_parser::WAILParser::new(self.base_dir.clone());
 
         // First parse and validate the WAIL schema
@@ -358,12 +403,65 @@ impl WAILGenerator {
             ))),
         }
     }
+
+    #[pyo3(name = "load_wail")]
+    fn _alias_load_wail(&mut self, content: String) -> PyResult<Option<Py<PyDict>>> {
+        self.load_schema(content)
+    }
+
+    #[pyo3(name = "get_prompt")]
+    fn _alias_get_prompt(
+        &self,
+        kwargs: Option<&PyDict>,
+    ) -> PyResult<(Option<String>, Vec<String>, Vec<String>)> {
+        self.build_prompt(kwargs)
+    }
+
+    #[pyo3(name = "parse_llm_output")]
+    fn _alias_parse_llm_output(&self, output: String) -> PyResult<PyObject> {
+        self.parse_output(output)
+    }
+
+    #[pyo3(name = "validate_wail")]
+    fn _alias_validate_wail(&self) -> PyResult<(Vec<String>, Vec<String>)> {
+        self.validate_schema()
+    }
+
+    // Streaming interface
+    /// Begin a streaming parse session.
+    fn start_stream(&mut self) {
+        self.sp = Some(StreamParser::new());
+        self.last_val = None;
+    }
+
+    /// Feed a chunk; returns the parsed/validated value once complete, else `None`.
+    #[pyo3(name = "parse", text_signature = "($self, chunk)")]
+    fn stream_parse<'p>(&mut self, py: Python<'p>, chunk: &str) -> PyResult<Option<PyObject>> {
+        let sp = self.sp.get_or_insert_with(StreamParser::new);
+        let step_out = sp
+            .step(chunk)
+            .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?;
+
+        if let Some(mut val) = step_out {
+            /* ready → run schema validation/fix just like in sync version */
+            let p = wail_parser::WAILParser::new(self.base_dir.clone());
+            p.parse_wail_file(self.wail_content.clone(), WAILFileType::Application, true)
+                .map_err(|e| PyValueError::new_err(format!("schema error: {:?}", e)))?;
+
+            p.validate_and_fix(&mut val)
+                .map_err(|e| PyValueError::new_err(format!("validation error: {:?}", e)))?;
+
+            self.last_val = Some(val.clone());
+            return Ok(Some(to_py(py, &val)));
+        }
+        Ok(None)
+    }
 }
 
 /// A Python module for working with WAIL files
 #[pymodule]
 fn gasp(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<WAILGenerator>()?;
+    m.add_class::<GASPEngine>()?;
     Ok(())
 }
 
@@ -754,8 +852,10 @@ mod tests {
             {"code": "404", "details": "error"}
         ]}"#;
 
-        use crate::rd_json_stack_parser::Parser;
-        let mut json = Parser::new(wrong_type.as_bytes().to_vec()).parse().unwrap();
+        use crate::json_parser::Parser;
+        let mut json = Parser::default()
+            .parse(wrong_type.as_bytes().to_vec())
+            .unwrap();
 
         // First validate to get the error
         parser.validate_and_fix(&mut json).unwrap();
@@ -784,7 +884,9 @@ mod tests {
             {"message": 123},
         }"#;
 
-        let mut json = Parser::new(wrong_type.as_bytes().to_vec()).parse().unwrap();
+        let mut json = Parser::default()
+            .parse(wrong_type.as_bytes().to_vec())
+            .unwrap();
 
         // First validate to get the error
         parser.validate_and_fix(&mut json).unwrap();

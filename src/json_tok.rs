@@ -14,12 +14,12 @@ pub enum Kind {
     RBracket,
     Colon,
     Comma,
-    True,
-    False,
-    Null,
-    Num,
-    Str,
-    Ident,
+    StrChunk,
+    StrEnd,
+    NumChunk,
+    NumEnd,
+    IdentChunk,
+    IdentEnd,
     Eof,
 }
 
@@ -33,14 +33,50 @@ pub struct Tok {
 #[derive(Debug, Clone, Copy)]
 enum LState {
     Start,
-    InString { quote: u8 },
-    InNumber { seen_dot: bool, seen_exp: bool },
-    InIdent,
+    InIdent {
+        start: usize, // first byte of the current chunk
+    },
+    InString {
+        quote: u8,    // opening quote byte (b'\"' or b'\\'')
+        start: usize, // chunk-start offset
+        escape: bool, // last byte was '\\'
+        u_digits: u8, // >0 while reading \\uXXXX hex digits
+    },
+    InNumber {
+        start: usize, // first digit of this number
+        seen_dot: bool,
+        seen_exp: bool,
+    },
     InLineComment,
-    InBlockComment { star: bool }, // saw ‘*’ last byte?
+    InBlockComment {
+        star: bool,
+    }, // saw ‘*’ last byte?
     Done,
 }
+#[inline]
+fn peek(bytes: &[u8], i: usize) -> Option<u8> {
+    bytes.get(i).copied()
+}
+#[inline]
+fn single(tok: &mut Tokenizer, k: Kind) -> Result<Tok, JsonError> {
+    let start = tok.pos;
+    tok.pos += 1;
+    Ok(Tok {
+        kind: k,
+        start,
+        end: start + 1,
+    })
+}
+#[inline]
+fn eof(pos: usize) -> Tok {
+    Tok {
+        kind: Kind::Eof,
+        start: pos,
+        end: pos,
+    }
+}
 
+#[derive(Debug, Clone)]
 pub struct Tokenizer {
     state: LState,
     pos: usize, // absolute byte position
@@ -55,8 +91,11 @@ impl Tokenizer {
     }
 
     /// Re-initialise after `push()` with the same logical state.
-    pub fn reset(&mut self, new_start: usize) {
-        self.pos = new_start;
+    pub fn reset_if_done(&mut self) {
+        if matches!(self.state, LState::Done) {
+            println!("IT WAS DONE");
+            self.state = LState::Start;
+        }
     }
 
     /// Return next token *or* `Tok {kind:Eof}` if no progress possible.
@@ -64,6 +103,11 @@ impl Tokenizer {
     pub fn next_tok(&mut self, src: &str) -> Result<Tok, JsonError> {
         use LState::*;
         let bytes = src.as_bytes();
+
+        println!("bytes_at_top_of_next_tok: {:?}", bytes);
+        println!("pos: {}", self.pos);
+
+        println!("state: {:?}", self.state);
         loop {
             match self.state {
                 Start => {
@@ -78,20 +122,40 @@ impl Tokenizer {
                         b']' => return single(self, Kind::RBracket),
                         b':' => return single(self, Kind::Colon),
                         b',' => return single(self, Kind::Comma),
-
                         b'"' | b'\'' => {
-                            self.state = InString {
-                                quote: bytes[self.pos],
+                            // ── need one byte of look-ahead; if we don’t have it yet, ask for more
+                            println!("bytes[{}]: {:?}", self.pos, bytes[self.pos]);
+                            if peek(bytes, self.pos + 1).is_none() {
+                                println!("need more data");
+                                return Ok(eof(self.pos)); // ←  tell the caller “need more data”
+                            }
+
+                            // If the next non-consumed byte is ':'
+                            if matches!(peek(bytes, self.pos + 1), Some(b':')) {
+                                // skip this quote – it’s spur­ious (came after an un-quoted key)
+                                self.pos += 1;
+                                continue;
+                            }
+
+                            // otherwise this really *is* the start of a string
+                            self.pos += 1; // consume the quote
+                            self.state = LState::InString {
+                                quote: bytes[self.pos - 1],
+                                start: self.pos,
+                                escape: false,
+                                u_digits: 0,
                             };
+                            continue;
                         }
                         b'0'..=b'9' | b'-' | b'.' => {
                             self.state = InNumber {
+                                start: self.pos,
                                 seen_dot: false,
                                 seen_exp: false,
                             };
                         }
                         b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                            self.state = InIdent;
+                            self.state = InIdent { start: self.pos }
                         }
                         b'/' if peek(bytes, self.pos + 1) == Some(b'/') => {
                             self.state = InLineComment;
@@ -108,88 +172,198 @@ impl Tokenizer {
                     }
                 }
 
-                InString { quote } => {
-                    let start = self.pos + 1; // skip opening quote
-                    while self.pos + 1 < bytes.len() {
-                        self.pos += 1;
-                        match bytes[self.pos] {
-                            b if b == quote => {
-                                let end = self.pos;
-                                self.pos += 1;
-                                self.state = Start;
-                                return Ok(Tok {
-                                    kind: Kind::Str,
-                                    start,
-                                    end,
-                                });
-                            }
-                            b'\\' => {
-                                // skip escaped byte
-                                self.pos += 1;
-                                if self.pos >= bytes.len() {
-                                    break;
+                LState::InString {
+                    quote,
+                    ref mut start,
+                    ref mut escape,
+                    ref mut u_digits,
+                } => {
+                    // keep scanning the current buffer
+                    while self.pos < bytes.len() {
+                        let b = bytes[self.pos];
+
+                        /* ───── currently inside an escape sequence ───── */
+                        if *escape {
+                            if *u_digits > 0 {
+                                // consuming one hex digit of a \uXXXX escape
+                                *u_digits -= 1;
+                                if *u_digits == 0 {
+                                    *escape = false; // finished the four digits
                                 }
+                            } else if b == b'u' {
+                                // saw the 'u' of a \uXXXX sequence – expect 4 hex digits next
+                                *u_digits = 4;
+                            } else {
+                                // simple two-character escape (“\n”, “\t”, “\\”, “\"”, …)
+                                *escape = false;
                             }
-                            _ => (),
+                            self.pos += 1;
+                            continue; // stay inside the string
                         }
+
+                        /* ───── backslash starts an escape ───── */
+                        if b == b'\\' {
+                            *escape = true;
+                            self.pos += 1;
+                            continue;
+                        }
+
+                        /* ───── closing quote ───── */
+                        if b == quote {
+                            let tok = Tok {
+                                kind: Kind::StrEnd,
+                                start: *start,
+                                end: self.pos,
+                            };
+                            self.pos += 1; // consume the quote itself
+                            self.state = LState::Start; // leave string mode
+                            return Ok(tok);
+                        }
+
+                        /* ordinary UTF-8 byte inside the string */
+                        self.pos += 1;
                     }
-                    return Err(JsonError::UnexpectedEof);
+
+                    /* ───── reached the end of this buffer ───── */
+                    if *start == self.pos {
+                        // we didn't actually consume anything new
+                        return Ok(eof(self.pos));
+                    }
+
+                    // emit a StrChunk for the substring we just scanned
+                    let tok = Tok {
+                        kind: Kind::StrChunk,
+                        start: *start,
+                        end: self.pos,
+                    };
+                    *start = self.pos; // the next chunk (next buffer) will start here
+                    return Ok(tok);
                 }
 
                 InNumber {
+                    start,
                     ref mut seen_dot,
                     ref mut seen_exp,
                 } => {
-                    let start = self.pos;
+                    let mut progressed = false;
+                    let mut at_start = self.pos == start; // ← helper
+                    let mut in_exp = *seen_exp &&            // true once we've read 'e' or 'E'
+                       peek(bytes, self.pos - 1).map(|b| b == b'e' || b == b'E')
+                       .unwrap_or(false);
+
                     while self.pos < bytes.len() {
                         match bytes[self.pos] {
-                            b'0'..=b'9' => self.pos += 1,
-                            b'.' if !*seen_dot => {
+                            // ---------- sign handling ----------
+                            b'+' | b'-' if at_start || in_exp => {
+                                self.pos += 1;
+                                progressed = true;
+                                at_start = false; // only the very first time
+                                in_exp = false; // one sign per exponent
+                            }
+
+                            // ---------- normal digits ----------
+                            b'0'..=b'9' => {
+                                self.pos += 1;
+                                progressed = true;
+                                at_start = false;
+                                in_exp = false;
+                            }
+
+                            // ---------- dot ----------
+                            b'.' if !*seen_dot && !*seen_exp => {
                                 *seen_dot = true;
                                 self.pos += 1;
+                                progressed = true;
+                                at_start = false;
                             }
+
+                            // ---------- exponent ----------
                             b'e' | b'E' if !*seen_exp => {
                                 *seen_exp = true;
                                 self.pos += 1;
-                                if matches!(peek(bytes, self.pos), Some(b'+' | b'-')) {
-                                    self.pos += 1;
-                                }
+                                progressed = true;
+                                at_start = false;
+                                in_exp = true; // expect optional sign / digits next
                             }
-                            _ => break,
+
+                            _ => break, // delimiter
                         }
                     }
-                    if self.pos == start {
-                        return Err(JsonError::UnexpectedChar(bytes[self.pos] as char));
+
+                    //----------------------------------------
+                    // Guarantee forward progress or bail out
+                    //----------------------------------------
+                    if !progressed && self.pos == bytes.len() {
+                        // we’re stuck at the very end of the slice: ask caller for more bytes
+                        return Ok(eof(self.pos));
                     }
+
+                    if self.pos == bytes.len() {
+                        // slice ended mid-number → NumChunk
+
+                        self.state = LState::InNumber {
+                            start: self.pos, // <- new start!
+                            seen_dot: *seen_dot,
+                            seen_exp: *seen_exp,
+                        };
+                        return Ok(Tok {
+                            kind: Kind::NumChunk,
+                            start,
+                            end: self.pos,
+                        });
+                    }
+
+                    // delimiter reached → NumEnd
                     let end = self.pos;
                     self.state = Start;
                     return Ok(Tok {
-                        kind: Kind::Num,
+                        kind: Kind::NumEnd,
                         start,
                         end,
                     });
                 }
 
-                InIdent => {
-                    let start = self.pos;
-                    while matches!(
-                        peek(bytes, self.pos),
-                        Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
-                    ) {
-                        self.pos += 1;
+                InIdent { start } => {
+                    let mut progressed = false;
+
+                    // ── absorb identifier bytes until we hit a delimiter ──
+                    while self.pos < bytes.len() {
+                        match bytes[self.pos] {
+                            // structural punctuation – always terminates an identifier
+                            b'{' | b'}' | b'[' | b']' | b',' | b':' |
+                            b'"' | b'\'' |                // quoted string begins
+                            b'/' |                        // start of a comment
+                            b'\n' | b'\r'                 // ← keep NEW-LINES as delimiters
+                                => break,
+                            _ => {
+                                self.pos += 1;
+                                progressed = true;
+                            }
+                        }
                     }
-                    let s = &src[start..self.pos];
-                    let kind = match s {
-                        "true" => Kind::True,
-                        "false" => Kind::False,
-                        "null" => Kind::Null,
-                        _ => Kind::Ident,
-                    };
-                    self.state = Start;
+
+                    /* need more bytes? (we're at buffer edge and took no step forward) */
+                    if !progressed && self.pos == bytes.len() {
+                        return Ok(eof(self.pos));
+                    }
+
+                    /* buffer finished mid-identifier → emit IdentChunk */
+                    if self.pos == bytes.len() {
+                        self.state = LState::InIdent { start: self.pos }; // next chunk begins here
+                        return Ok(Tok {
+                            kind: Kind::IdentChunk,
+                            start,
+                            end: self.pos,
+                        });
+                    }
+
+                    /* delimiter reached (but not consumed) → IdentEnd */
+                    let end = self.pos; // delimiter still un-consumed
+                    self.state = LState::Start; // let outer loop handle the delimiter next
                     return Ok(Tok {
-                        kind,
+                        kind: Kind::IdentEnd,
                         start,
-                        end: self.pos,
+                        end,
                     });
                 }
 
@@ -219,29 +393,6 @@ impl Tokenizer {
                 }
 
                 Done => return Ok(eof(self.pos)),
-            }
-        }
-
-        #[inline]
-        fn peek(bytes: &[u8], i: usize) -> Option<u8> {
-            bytes.get(i).copied()
-        }
-        #[inline]
-        fn single(tok: &mut Tokenizer, k: Kind) -> Result<Tok, JsonError> {
-            let start = tok.pos;
-            tok.pos += 1;
-            Ok(Tok {
-                kind: k,
-                start,
-                end: start + 1,
-            })
-        }
-        #[inline]
-        fn eof(pos: usize) -> Tok {
-            Tok {
-                kind: Kind::Eof,
-                start: pos,
-                end: pos,
             }
         }
     }

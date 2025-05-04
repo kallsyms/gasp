@@ -75,16 +75,16 @@ pub enum MainStatement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILField<'a> {
+pub struct WAILField {
     pub name: String,
-    pub field_type: WAILType<'a>,
+    pub field_type: WAILType,
     pub annotations: Vec<WAILAnnotation>,
 }
 
 #[derive(Debug, Clone)]
-pub struct WAILObjectDef<'a> {
+pub struct WAILObjectDef {
     pub name: String,
-    pub fields: Vec<WAILField<'a>>,
+    pub fields: Vec<WAILField>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,20 +95,19 @@ pub struct WAILObjectInstantiation {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILTemplateDef<'a> {
+pub struct WAILTemplateDef {
     pub name: String,
-    pub inputs: Vec<WAILField<'a>>,
-    pub output: WAILField<'a>,
+    pub inputs: Vec<WAILField>,
+    pub output: WAILField,
     pub prompt_template: String,
     pub annotations: Vec<WAILAnnotation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILMainDef<'a> {
+pub struct WAILMainDef {
     pub statements: Vec<MainStatement>,
     pub prompt: String,
-    pub template_args: HashMap<String, WAILType<'a>>,
-    pub _phantom: PhantomData<&'a ()>,
+    pub template_args: HashMap<String, WAILType>,
 }
 
 impl TemplateArgument {
@@ -153,17 +152,16 @@ fn get_nested_value<'a>(json: &'a HashMap<String, JsonValue>, path: &str) -> Opt
     current
 }
 
-impl<'a> WAILMainDef<'a> {
+impl<'a> WAILMainDef {
     pub fn new(
         statements: Vec<MainStatement>,
         prompt: String,
-        template_args: Option<HashMap<String, WAILType<'a>>>,
+        template_args: Option<HashMap<String, WAILType>>,
     ) -> Self {
         WAILMainDef {
             statements,
             prompt,
             template_args: template_args.unwrap_or_default(),
-            _phantom: PhantomData,
         }
     }
 
@@ -482,7 +480,7 @@ impl<'a> WAILMainDef<'a> {
     pub fn validate_llm_response(
         &self,
         json: &JsonValue,
-        registry: &HashMap<String, WAILTemplateDef<'a>>,
+        registry: &HashMap<String, WAILTemplateDef>,
     ) -> Result<(), (String, Option<String>, JsonValidationError)> {
         // For each template call in statements, validate its output
         for statement in &self.statements {
@@ -628,7 +626,7 @@ fn count_leading_whitespace(s: &str) -> usize {
     s.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-impl<'a> WAILTemplateDef<'a> {
+impl<'a> WAILTemplateDef {
     pub fn interpolate_prompt(
         &self,
         arguments: Option<&HashMap<String, TemplateArgument>>,

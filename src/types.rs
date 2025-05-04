@@ -2,6 +2,7 @@ use crate::{
     json_types::JsonError,
     parser_types::{WAILAnnotation, WAILField},
 };
+use core::num;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -28,6 +29,22 @@ pub enum JsonValidationError {
     JsonParserError(JsonError),
 }
 
+fn string_type() -> String {
+    "String".to_string()
+}
+fn number_type() -> String {
+    "Number".to_string()
+}
+fn object_type() -> String {
+    "Object".to_string()
+}
+fn array_type() -> String {
+    "Array".to_string()
+}
+fn tool_type() -> String {
+    "Tool".to_string()
+}
+
 #[derive(Debug)]
 pub enum PathSegment {
     Root((String, Option<String>)),
@@ -47,35 +64,35 @@ pub enum WAILValue {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WAILSimpleType<'a> {
-    String(WAILString<'a>),
-    Boolean(WAILBoolean<'a>),
-    Number(WAILNumber<'a>),
+pub enum WAILSimpleType {
+    String(WAILString),
+    Boolean(WAILBoolean),
+    Number(WAILNumber),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WAILCompositeType<'a> {
-    Object(WAILObject<'a>),
-    Array(WAILArray<'a>),
-    Union(WAILUnion<'a>),
+pub enum WAILCompositeType {
+    Object(WAILObject),
+    Array(WAILArray),
+    Union(WAILUnion),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILUnion<'a> {
-    pub members: Vec<WAILField<'a>>,
-    pub type_data: WAILTypeData<'a>,
+pub struct WAILUnion {
+    pub members: Vec<WAILField>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILArray<'a> {
-    pub values: Vec<WAILType<'a>>,
-    pub type_data: WAILTypeData<'a>,
+pub struct WAILArray {
+    pub values: Vec<WAILType>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WAILType<'a> {
-    Simple(WAILSimpleType<'a>),
-    Composite(WAILCompositeType<'a>),
+pub enum WAILType {
+    Simple(WAILSimpleType),
+    Composite(WAILCompositeType),
     Value(WAILValue), // For literal values
 }
 
@@ -101,7 +118,7 @@ pub fn format_annoations(annotations: Vec<WAILAnnotation>) -> String {
     )
 }
 
-impl<'a> WAILType<'a> {
+impl WAILType {
     pub fn to_schema(&self) -> String {
         match self {
             WAILType::Simple(simple) => match simple {
@@ -189,19 +206,19 @@ impl<'a> WAILType<'a> {
         }
     }
 
-    pub fn type_name(&self) -> &'a str {
-        return self.type_data().type_name;
+    pub fn type_name(&self) -> String {
+        return self.type_data().type_name.clone();
     }
 
-    pub fn field_definitions(&self) -> Option<Vec<WAILField<'a>>> {
+    pub fn field_definitions(&self) -> Option<Vec<WAILField>> {
         return self.type_data().field_definitions.clone();
     }
 
-    pub fn element_type(&self) -> Option<Box<WAILType<'a>>> {
+    pub fn element_type(&self) -> Option<Box<WAILType>> {
         return self.type_data().element_type.clone();
     }
 
-    pub fn type_data(&self) -> &WAILTypeData<'a> {
+    pub fn type_data(&self) -> &WAILTypeData {
         match self {
             WAILType::Simple(simple) => match simple {
                 WAILSimpleType::String(s) => &s.type_data,
@@ -319,67 +336,67 @@ impl<'a> WAILType<'a> {
     }
 }
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILTypeData<'a> {
+pub struct WAILTypeData {
     pub json_type: JsonValue,
-    pub type_name: &'a str,
-    pub field_definitions: Option<Vec<WAILField<'a>>>,
-    pub element_type: Option<Box<WAILType<'a>>>,
+    pub type_name: String,
+    pub field_definitions: Option<Vec<WAILField>>,
+    pub element_type: Option<Box<WAILType>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILInteger<'a> {
+pub struct WAILInteger {
     pub value: u64,
-    pub type_data: WAILTypeData<'a>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILFloat<'a> {
+pub struct WAILFloat {
     pub value: f64,
-    pub type_data: WAILTypeData<'a>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WAILNumber<'a> {
-    Integer(WAILInteger<'a>),
-    Float(WAILFloat<'a>),
+pub enum WAILNumber {
+    Integer(WAILInteger),
+    Float(WAILFloat),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILObject<'a> {
-    pub value: HashMap<WAILString<'a>, WAILType<'a>>,
-    pub type_data: WAILTypeData<'a>,
+pub struct WAILObject {
+    pub value: HashMap<WAILString, WAILType>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone)]
-pub struct WAILString<'a> {
+pub struct WAILString {
     pub value: String,
-    pub type_data: WAILTypeData<'a>,
+    pub type_data: WAILTypeData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WAILBoolean<'a> {
+pub struct WAILBoolean {
     pub value: String,
-    pub type_data: WAILTypeData<'a>,
+    pub type_data: WAILTypeData,
 }
 
-impl<'a> Hash for WAILString<'a> {
+impl<'a> Hash for WAILString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.value.hash(state)
     }
 }
 
-impl<'a> PartialEq for WAILString<'a> {
+impl<'a> PartialEq for WAILString {
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
     }
 }
 
-impl<'a> Eq for WAILString<'a> {}
+impl<'a> Eq for WAILString {}
 
 use std::convert::{TryFrom, TryInto};
 
 // First for WAILString since it's used by other types
-impl<'a> TryFrom<JsonValue> for WAILString<'a> {
+impl<'a> TryFrom<JsonValue> for WAILString {
     type Error = String;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
@@ -388,7 +405,7 @@ impl<'a> TryFrom<JsonValue> for WAILString<'a> {
                 value: s,
                 type_data: WAILTypeData {
                     json_type: value,
-                    type_name: STRING_TYPE,
+                    type_name: string_type(),
                     field_definitions: None,
                     element_type: None,
                 },
@@ -399,7 +416,7 @@ impl<'a> TryFrom<JsonValue> for WAILString<'a> {
 }
 
 // For WAILNumber
-impl<'a> TryFrom<JsonValue> for WAILNumber<'a> {
+impl<'a> TryFrom<JsonValue> for WAILNumber {
     type Error = String;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
@@ -409,7 +426,7 @@ impl<'a> TryFrom<JsonValue> for WAILNumber<'a> {
                     value: i as u64,
                     type_data: WAILTypeData {
                         json_type: value,
-                        type_name: NUMBER_TYPE,
+                        type_name: number_type(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -418,7 +435,7 @@ impl<'a> TryFrom<JsonValue> for WAILNumber<'a> {
                     value: f,
                     type_data: WAILTypeData {
                         json_type: value,
-                        type_name: NUMBER_TYPE,
+                        type_name: number_type(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -430,7 +447,7 @@ impl<'a> TryFrom<JsonValue> for WAILNumber<'a> {
 }
 
 // For WAILSimpleType
-impl<'a> TryFrom<JsonValue> for WAILSimpleType<'a> {
+impl<'a> TryFrom<JsonValue> for WAILSimpleType {
     type Error = String;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
@@ -443,7 +460,7 @@ impl<'a> TryFrom<JsonValue> for WAILSimpleType<'a> {
 }
 
 // For WAILObject
-impl<'a> TryFrom<JsonValue> for WAILObject<'a> {
+impl<'a> TryFrom<JsonValue> for WAILObject {
     type Error = String;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
@@ -470,7 +487,7 @@ impl<'a> TryFrom<JsonValue> for WAILObject<'a> {
                     value: wail_map,
                     type_data: WAILTypeData {
                         json_type: value,
-                        type_name: OBJECT_TYPE,
+                        type_name: object_type(),
                         field_definitions: Some(field_defs),
                         element_type: None,
                     },
@@ -482,7 +499,7 @@ impl<'a> TryFrom<JsonValue> for WAILObject<'a> {
 }
 
 // For WAILType
-impl<'a> TryFrom<JsonValue> for WAILType<'a> {
+impl<'a> TryFrom<JsonValue> for WAILType {
     type Error = String;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
@@ -497,8 +514,8 @@ impl<'a> TryFrom<JsonValue> for WAILType<'a> {
 }
 
 // And for converting back to JsonValue
-impl<'a> From<WAILType<'a>> for JsonValue {
-    fn from(wail_type: WAILType<'a>) -> JsonValue {
+impl<'a> From<WAILType> for JsonValue {
+    fn from(wail_type: WAILType) -> JsonValue {
         match wail_type {
             WAILType::Simple(simple) => match simple {
                 WAILSimpleType::String(s) => JsonValue::String(s.value),
@@ -593,14 +610,14 @@ mod tests {
         let string_array = WAILType::Composite(WAILCompositeType::Array(WAILArray {
             type_data: WAILTypeData {
                 json_type: JsonValue::Array(vec![]),
-                type_name: ARRAY_TYPE,
+                type_name: array_type(),
                 field_definitions: None,
                 element_type: Some(Box::new(WAILType::Simple(WAILSimpleType::String(
                     WAILString {
                         value: "hello".to_string(),
                         type_data: WAILTypeData {
                             json_type: JsonValue::String("hello".to_string()),
-                            type_name: STRING_TYPE,
+                            type_name: string_type(),
                             field_definitions: None,
                             element_type: None,
                         },
@@ -612,7 +629,7 @@ mod tests {
                     value: "hello".to_string(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String("hello".to_string()),
-                        type_name: STRING_TYPE,
+                        type_name: string_type(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -621,7 +638,7 @@ mod tests {
                     value: "world".to_string(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String("world".to_string()),
-                        type_name: STRING_TYPE,
+                        type_name: string_type(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -648,7 +665,7 @@ mod tests {
                     value: String::new(),
                     type_data: WAILTypeData {
                         json_type: JsonValue::String(String::new()),
-                        type_name: "String",
+                        type_name: string_type(),
                         field_definitions: None,
                         element_type: None,
                     },
@@ -662,7 +679,7 @@ mod tests {
                         value: 0,
                         type_data: WAILTypeData {
                             json_type: JsonValue::Number(Number::Integer(0)),
-                            type_name: "Number",
+                            type_name: number_type(),
                             field_definitions: None,
                             element_type: None,
                         },
@@ -676,7 +693,7 @@ mod tests {
             value: HashMap::new(),
             type_data: WAILTypeData {
                 json_type: JsonValue::Object(HashMap::new()),
-                type_name: "Person",
+                type_name: "Person".to_string(),
                 field_definitions: Some(person_fields),
                 element_type: None,
             },

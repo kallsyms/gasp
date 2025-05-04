@@ -104,17 +104,10 @@ pub enum JsonError {
     DuplicateKey(String),
     UnexpectedChar(char),
     UnexpectedEof,
+    EOF,
     InvalidNumber(String),
-    UnmatchedBrace,
-    UnmatchedBracket,
-    ExpectedColon,
-    ExpectedComma,
     InvalidEscape,
-    InvalidString,
     InvalidKey,
-    ReservedKeyword(String),
-    StreamingSnapshot(JsonValue),
-    UnexpectedToken(String),
 }
 
 impl fmt::Display for JsonError {
