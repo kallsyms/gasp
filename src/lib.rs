@@ -6,18 +6,14 @@ mod json_sax_scanner;
 mod json_tok;
 mod json_types;
 mod parser;
-mod parser_types;
 mod python_types;
 mod tag_finder;
-mod template_parser;
-mod types;
 
 use json_parser::StreamParser;
 use parser::PyParser;
 use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString, PyType};
 use pyo3::Python;
 use std::collections::HashMap;
-use types::JsonValidationError;
 
 use crate::json_types::{JsonValue, Number};
 
