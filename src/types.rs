@@ -343,6 +343,127 @@ pub struct WAILTypeData {
     pub element_type: Option<Box<WAILType>>,
 }
 
+impl WAILType {
+    pub fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            WAILType::Simple(
+                WAILSimpleType::String(_) | WAILSimpleType::Boolean(_) | WAILSimpleType::Number(_)
+            )
+        )
+    }
+
+    pub fn parse_scalar(&self, s: &str) -> Result<JsonValue, String> {
+        match self {
+            WAILType::Simple(WAILSimpleType::String(_)) => Ok(JsonValue::String(s.into())),
+            WAILType::Simple(WAILSimpleType::Boolean(_)) => {
+                match s.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" => Ok(JsonValue::Boolean(true)),
+                    "false" | "0" => Ok(JsonValue::Boolean(false)),
+                    _ => Err("invalid boolean".into()),
+                }
+            }
+            WAILType::Simple(WAILSimpleType::Number(WAILNumber::Integer(_))) => s
+                .trim()
+                .parse::<i64>()
+                .map(|n| JsonValue::Number(Number::Integer(n)))
+                .map_err(|_| "invalid integer".into()),
+            WAILType::Simple(WAILSimpleType::Number(WAILNumber::Float(_))) => s
+                .trim()
+                .parse::<f64>()
+                .map(|n| JsonValue::Number(Number::Float(n)))
+                .map_err(|_| "invalid float".into()),
+            _ => Err("not a scalar type".into()),
+        }
+    }
+    pub fn tag(&self) -> String {
+        match self {
+            WAILType::Simple(WAILSimpleType::String(_)) => "string".into(),
+            WAILType::Simple(WAILSimpleType::Boolean(_)) => "boolean".into(),
+            WAILType::Simple(WAILSimpleType::Number(WAILNumber::Integer(_))) => "integer".into(),
+            WAILType::Simple(WAILSimpleType::Number(WAILNumber::Float(_))) => "float".into(),
+
+            WAILType::Composite(WAILCompositeType::Object(o)) => {
+                format!("object_{}", o.type_data.type_name.to_ascii_lowercase())
+            }
+            WAILType::Composite(WAILCompositeType::Union(u)) => {
+                format!("union_{}", u.type_data.type_name.to_ascii_lowercase())
+            }
+            WAILType::Composite(WAILCompositeType::Array(a)) => {
+                let elem = a
+                    .type_data
+                    .element_type
+                    .as_ref()
+                    .map(|t| t.tag())
+                    .unwrap_or("unknown".into());
+                format!("array_of_{}", elem)
+            }
+            _ => "unknown".into(),
+        }
+    }
+}
+
+/* ============================================================================
+Two tiny helpers – *purely* structural checks, no registry look-ups
+========================================================================== */
+
+pub trait Shape {
+    fn same_shape_as(&self, other: &Self) -> bool;
+    fn accepts(&self, candidate: &Self) -> bool;
+}
+
+impl Shape for WAILType {
+    fn same_shape_as(&self, other: &Self) -> bool {
+        use WAILCompositeType::*;
+        match (self, other) {
+            (WAILType::Simple(_), WAILType::Simple(_)) => true,
+            (WAILType::Composite(Array(a)), WAILType::Composite(Array(b))) => a
+                .type_data
+                .element_type
+                .as_ref()
+                .zip(b.type_data.element_type.as_ref())
+                .map_or(false, |(ta, tb)| ta.same_shape_as(tb)),
+            (WAILType::Composite(Union(u1)), WAILType::Composite(Union(u2))) => {
+                u1.members.len() == u2.members.len()
+                    && u1
+                        .members
+                        .iter()
+                        .zip(&u2.members)
+                        .all(|(f1, f2)| f1.field_type.same_shape_as(&f2.field_type))
+            }
+            (WAILType::Composite(Object(o1)), WAILType::Composite(Object(o2))) => o1
+                .type_data
+                .field_definitions
+                .as_ref()
+                .zip(o2.type_data.field_definitions.as_ref())
+                .map_or(false, |(f1, f2)| {
+                    f1.len() == f2.len()
+                        && f1
+                            .iter()
+                            .zip(f2)
+                            .all(|(a, b)| a.field_type.same_shape_as(&b.field_type))
+                }),
+            _ => false,
+        }
+    }
+
+    fn accepts(&self, candidate: &Self) -> bool {
+        use WAILCompositeType::*;
+        match self {
+            WAILType::Composite(Array(arr)) => {
+                arr.type_data.element_type.as_ref().map_or(false, |et| {
+                    et.accepts(candidate) || et.same_shape_as(candidate)
+                })
+            }
+            WAILType::Composite(Union(u)) => u
+                .members
+                .iter()
+                .any(|m| m.field_type.same_shape_as(candidate) || m.field_type.accepts(candidate)),
+            _ => self.same_shape_as(candidate),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WAILInteger {
     pub value: u64,
@@ -544,6 +665,76 @@ impl<'a> From<WAILType> for JsonValue {
                 WAILValue::Number(n) => JsonValue::Number(Number::Integer(n)),
                 WAILValue::Float(f) => JsonValue::Number(Number::Float(f)),
                 WAILValue::TypeRef(t) => JsonValue::String(t),
+            },
+        }
+    }
+}
+
+impl Default for WAILString {
+    fn default() -> Self {
+        Self {
+            value: String::new(),
+            type_data: WAILTypeData {
+                json_type: JsonValue::String(String::new()),
+                type_name: "String".into(),
+                field_definitions: None,
+                element_type: None,
+            },
+        }
+    }
+}
+
+impl Default for WAILBoolean {
+    fn default() -> Self {
+        Self {
+            value: "false".into(),
+            type_data: WAILTypeData {
+                json_type: JsonValue::Boolean(false),
+                type_name: "Boolean".into(),
+                field_definitions: None,
+                element_type: None,
+            },
+        }
+    }
+}
+
+impl Default for WAILNumber {
+    fn default() -> Self {
+        WAILNumber::Integer(WAILInteger {
+            value: 0,
+            type_data: WAILTypeData {
+                json_type: JsonValue::Number(Number::Integer(0)),
+                type_name: "Number".into(),
+                field_definitions: None,
+                element_type: None,
+            },
+        })
+    }
+}
+
+impl Default for WAILArray {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            type_data: WAILTypeData {
+                json_type: JsonValue::Array(Vec::new()),
+                type_name: "Array".into(),
+                field_definitions: None,
+                element_type: None,
+            },
+        }
+    }
+}
+
+impl Default for WAILUnion {
+    fn default() -> Self {
+        Self {
+            members: Vec::new(),
+            type_data: WAILTypeData {
+                json_type: JsonValue::Object(std::collections::HashMap::new()),
+                type_name: "Union".into(),
+                field_definitions: None,
+                element_type: None,
             },
         }
     }

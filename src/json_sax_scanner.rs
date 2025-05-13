@@ -73,7 +73,6 @@ impl Scanner {
     /// Caller may call repeatedly until it gets `NeedMore`.
     pub fn next_step(&mut self) -> Step {
         let tok = self.lexer.next_tok(&self.buf);
-        println!("next_tok: {:?}", tok);
 
         let tok = match tok {
             Ok(t) => t,

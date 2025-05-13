@@ -93,7 +93,6 @@ impl Tokenizer {
     /// Re-initialise after `push()` with the same logical state.
     pub fn reset_if_done(&mut self) {
         if matches!(self.state, LState::Done) {
-            println!("IT WAS DONE");
             self.state = LState::Start;
         }
     }
@@ -104,10 +103,6 @@ impl Tokenizer {
         use LState::*;
         let bytes = src.as_bytes();
 
-        println!("bytes_at_top_of_next_tok: {:?}", bytes);
-        println!("pos: {}", self.pos);
-
-        println!("state: {:?}", self.state);
         loop {
             match self.state {
                 Start => {
@@ -124,9 +119,7 @@ impl Tokenizer {
                         b',' => return single(self, Kind::Comma),
                         b'"' | b'\'' => {
                             // ── need one byte of look-ahead; if we don’t have it yet, ask for more
-                            println!("bytes[{}]: {:?}", self.pos, bytes[self.pos]);
                             if peek(bytes, self.pos + 1).is_none() {
-                                println!("need more data");
                                 return Ok(eof(self.pos)); // ←  tell the caller “need more data”
                             }
 

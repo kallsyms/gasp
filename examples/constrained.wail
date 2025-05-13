@@ -97,20 +97,3 @@ template ConstrainedPrompt(task: String, files: String, lines: Number, turns: Nu
     {{return_type}}
     """
 }
-
-main {
-    template_args {
-        files: String,
-        lines: Number,
-        pinned_files: String,
-        viewer_state: String,
-        turns: Number,
-        task: String
-    }
-
-    let res = ConstrainedPrompt(files: $files, lines: $lines, pinned_files: $pinned_files, viewer_state: $viewer_state, turns: $turns, task: $task);
-
-    prompt {
-        {{res}}
-    }
-}

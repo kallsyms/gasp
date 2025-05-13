@@ -1,7 +1,8 @@
 use crate::json_tok::{Kind, Tok, Tokenizer};
 use crate::json_types::{JsonError, JsonValue, Number};
 use crate::tag_finder::{TagEvent, TagFinder};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::default;
 
 use crate::json_sax_scanner::{Event, Scanner, Step as ScanStep};
 
@@ -186,7 +187,6 @@ impl Builder {
 
             /*──────── structural close ──────*/
             Event::EndObj | Event::EndArr => {
-                println!("EndObj/EndArr");
                 let finished_val = self.finish_container()?;
                 return self.finish_value_and_maybe_snapshot(finished_val);
             }
@@ -257,8 +257,6 @@ impl Builder {
                 self.ensure_num_frame();
 
                 if let Some(Frame::Num { buf }) = self.stack.last_mut() {
-                    println!("NumberChunk: {:?}", chunk);
-                    println!("buf: {:?}", buf);
                     buf.push_str(chunk);
 
                     if should_snapshot {
@@ -444,10 +442,7 @@ impl Builder {
         if let Some(parent) = self.stack.last_mut() {
             match parent {
                 Frame::Obj { map, last_key } => {
-                    println!("Last key: {:?}", last_key);
-
                     let key = last_key.take().ok_or(JsonError::InvalidKey)?;
-                    println!("Key: {:?}", key);
                     map.insert(key.clone(), val.clone());
                 }
                 Frame::Arr { vec } => {
@@ -506,6 +501,10 @@ impl Builder {
 
     pub fn finish(&mut self, streaming: bool) -> Result<JsonValue, JsonError> {
         /*──────────── when we’re *inside* something at EOF / NeedMore ───────────*/
+        if self.stack.is_empty() {
+            return Ok(JsonValue::Null); // or JsonValue::Array(vec![]) if you prefer
+        }
+
         if self.stack.len() != 1 {
             if streaming {
                 /*───────────────── 1. try to patch an object value ─────────────────*/
@@ -562,7 +561,6 @@ impl Builder {
                 }
 
                 /*───────────────── 3. flush the dangling scalar itself ─────────────*/
-                println!("Flushing dangling scalar");
                 return match self.stack.last().unwrap() {
                     Frame::Str { buf } => Ok(JsonValue::String(unescape(buf)?)),
                     Frame::Num { buf } => Ok(JsonValue::Number(parse_number(buf)?)),
@@ -627,13 +625,11 @@ impl Parser {
         loop {
             match self.scanner.next_step() {
                 ScanStep::Event(ev) => {
-                    println!("Event: {:?}", ev);
                     if let Some(Snapshot::Complete(v)) = self.builder.feed_event(ev)? {
                         return Ok(v);
                     }
                 }
                 ScanStep::NeedMore => {
-                    println!("NeedMore");
                     // End of buffer – finish.
                     return self.builder.finish(self.streaming);
                 }
@@ -649,16 +645,26 @@ impl Parser {
 #[derive(Debug)]
 pub struct StreamParser {
     tagger: TagFinder,
+    capturing: bool,
     inner: Parser,
     done: bool,
+    wanted: HashSet<String>,
+}
+
+impl default::Default for StreamParser {
+    fn default() -> Self {
+        Self::new(vec![])
+    }
 }
 
 impl StreamParser {
-    pub fn new() -> Self {
+    pub fn new(tags: Vec<String>) -> Self {
         Self {
+            wanted: tags.into_iter().collect(),
             tagger: TagFinder::new(),
             inner: Parser::new(true), // keeps its own scanner
             done: false,
+            capturing: false,
         }
     }
 
@@ -674,12 +680,17 @@ impl StreamParser {
         let mut latest = None;
         self.tagger.push(chunk, |ev| {
             match ev {
-                TagEvent::Open { .. } => Ok(()),
+                TagEvent::Open(name) => {
+                    self.capturing = self.wanted.is_empty()           // accept all
+                        || self.wanted.contains(name.as_str()); // accept selected
+                    if self.capturing {
+                        self.inner = Parser::new(true);
+                    }
+                    Ok(())
+                }
                 TagEvent::Bytes(bytes) => {
                     let parse_res = self.inner.parse(bytes.as_bytes().to_vec());
-                    println!("bytes: {:?}", bytes);
 
-                    println!("parse_res: {:?}", parse_res);
                     match parse_res {
                         Ok(JsonValue::Array(arr)) => {
                             if arr.len() == 1 {
@@ -694,14 +705,15 @@ impl StreamParser {
 
                     Ok(()) // placeholder
                 }
-
-                TagEvent::Close => {
-                    println!("Chunk {:?} finished", chunk);
-                    // flush whatever is still on the builder’s stack
-                    latest = Some(self.inner.builder.finish(true)?); // ← add this line
-                    self.done = true;
+                TagEvent::Close(name) if self.capturing => {
+                    if self.wanted.is_empty() || self.wanted.contains(name.as_str()) {
+                        latest = Some(self.inner.builder.finish(true)?);
+                        self.done = true;
+                    }
+                    self.capturing = false;
                     Ok(())
                 }
+                _ => Ok(()),
             }
         })?;
         Ok(latest)
@@ -768,7 +780,7 @@ mod tests {
             let bytes   = wrapped.as_bytes();
 
             /* ── 3. feed the wrapped text in `chunk_sz`-sized pieces ────── */
-            let mut sp = StreamParser::new();
+            let mut sp = StreamParser::default();
             let mut i  = 0;
             let mut end_val = None;
             while i < bytes.len() {
@@ -784,7 +796,6 @@ mod tests {
             /* ── 5. grab the final value (empty chunk → None, but we expect Some) ─ */
             let final_val = end_val.unwrap();
 
-            println!("final_val: {:?}", final_val);
 
             /* ── 6. compare ───────────────────────────────────────────── */
             prop_assert_eq!(final_val, ref_internal);
@@ -800,13 +811,11 @@ mod tests {
         // rest of the object plus closing tag and extra chatter
         let chunk2 = r#", "age": 30}</User> blah blah"#;
 
-        let mut sp = StreamParser::new();
+        let mut sp = StreamParser::default();
 
         // ── first chunk ───────────────────────────
         let part1 = sp.step(chunk1).expect("stream step 1 failed");
         assert!(!sp.is_done(), "should not be done after first chunk");
-
-        println!("part1: {:?}", part1);
 
         // We expect a partial with only the first key.
         match part1 {
@@ -823,8 +832,6 @@ mod tests {
         // ── second chunk ──────────────────────────
         let part2 = sp.step(chunk2).expect("stream step 2 failed");
         assert!(sp.is_done(), "parser should be done after close tag");
-
-        println!("part2: {:?}", part2);
 
         // Final value must contain both fields.
         if let JsonValue::Object(ref m) = part2.unwrap() {
@@ -853,7 +860,7 @@ mod tests {
             r#"0}</User> garbage"#, // rest of value + close tag + trailing text
         ];
 
-        let mut sp = StreamParser::new();
+        let mut sp = StreamParser::default();
         let mut snapshot = None;
 
         for (i, slice) in chunks.iter().enumerate() {
@@ -881,7 +888,6 @@ mod tests {
                     assert_eq!(m.len(), 1);
                 }
                 (4, Some(JsonValue::Object(m))) => {
-                    println!("m: {:?}", m);
                     assert_eq!(
                         m.get("age").unwrap(),
                         &JsonValue::Number(Number::Integer(3))
@@ -910,7 +916,7 @@ mod tests {
 
         /* helper: run one set of slices through StreamParser and return the final value */
         fn run(chunks: &[&str]) -> JsonValue {
-            let mut sp = StreamParser::new();
+            let mut sp = StreamParser::default();
             let mut last = None;
 
             for (i, part) in chunks.iter().enumerate() {
@@ -1050,7 +1056,6 @@ mod tests {
             JsonValue::Object(m)
         };
         let joined: String = case10.concat();
-        println!("JOINED_STRING: {}", joined);
         assert_eq!(run(&case10), exp10);
 
         // ──────────────────────────────────────────────────────────────────────
@@ -1286,7 +1291,6 @@ mod tests {
 
         for (input, expected_err) in cases {
             let mut parser = Parser::default();
-            println!("Testing input: {}", input);
             match parser.parse(input.as_bytes().to_vec()) {
                 Err(e) => assert_eq!(e, expected_err),
                 Ok(_) => panic!("Expected error for input: {}", input),
@@ -1459,5 +1463,32 @@ mod tests {
             }
             _ => panic!("Expected object"),
         }
+    }
+
+    #[test]
+    fn test_bad_array_recovery() {
+        let mut parser = StreamParser::default();
+        let result = r#"
+        <action>
+            {"message": 123},
+            {"code": "404", "details": "error"}
+</action>
+        "#;
+
+        let bytes = result.as_bytes();
+
+        let mut i = 0;
+        let mut end_val = None;
+        while i < bytes.len() {
+            let end = usize::min(i + 1, bytes.len());
+            let chunk = std::str::from_utf8(&bytes[i..end]).unwrap();
+
+            end_val = parser.step(chunk).unwrap();
+            i = end;
+        }
+        assert!(parser.is_done(), "stream parser did not finish");
+
+        /* ── 5. grab the final value (empty chunk → None, but we expect Some) ─ */
+        // let final_val = end_val.unwrap();
     }
 }

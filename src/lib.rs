@@ -268,9 +268,6 @@ impl GASPEngine {
                             "Possible typo: '{}' might be '{}' at {}",
                             type_name, similar_to, location
                         ),
-                        wail_parser::ValidationWarning::NoMainBlock => {
-                            "No main block found in WAIL schema".to_string()
-                        }
                     })
                     .collect();
 
@@ -367,9 +364,6 @@ impl GASPEngine {
                             "Possible typo: '{}' might be '{}' at {}",
                             type_name, similar_to, location
                         ),
-                        wail_parser::ValidationWarning::NoMainBlock => {
-                            "No main block found in WAIL schema".to_string()
-                        }
                     })
                     .collect();
 
@@ -430,14 +424,14 @@ impl GASPEngine {
     // Streaming interface
     /// Begin a streaming parse session.
     fn start_stream(&mut self) {
-        self.sp = Some(StreamParser::new());
+        self.sp = Some(StreamParser::default());
         self.last_val = None;
     }
 
     /// Feed a chunk; returns the parsed/validated value once complete, else `None`.
     #[pyo3(name = "parse", text_signature = "($self, chunk)")]
     fn stream_parse<'p>(&mut self, py: Python<'p>, chunk: &str) -> PyResult<Option<PyObject>> {
-        let sp = self.sp.get_or_insert_with(StreamParser::new);
+        let sp = self.sp.get_or_insert_with(StreamParser::default);
         let step_out = sp
             .step(chunk)
             .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?;

@@ -51,27 +51,14 @@ pub enum TemplateArgument {
     TypeRef(String), // For when we reference a type like "String" or "Number"
     TemplateArgRef(String),
     ObjectRef(String),
+    Array(Vec<TemplateArgument>),
+    Object(HashMap<String, TemplateArgument>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WAILTemplateCall {
     pub template_name: String,
     pub arguments: HashMap<String, TemplateArgument>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MainStatement {
-    Assignment {
-        variable: String,
-        template_call: WAILTemplateCall,
-    },
-    ObjectInstantiation {
-        variable: String,
-        object_type: String,
-        arguments: HashMap<String, TemplateArgument>,
-    },
-    TemplateCall(WAILTemplateCall),
-    Comment(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,7 +80,6 @@ pub struct WAILObjectInstantiation {
     pub object_type: String,
     pub fields: HashMap<String, TemplateArgument>,
 }
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct WAILTemplateDef {
     pub name: String,
@@ -101,13 +87,6 @@ pub struct WAILTemplateDef {
     pub output: WAILField,
     pub prompt_template: String,
     pub annotations: Vec<WAILAnnotation>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WAILMainDef {
-    pub statements: Vec<MainStatement>,
-    pub prompt: String,
-    pub template_args: HashMap<String, WAILType>,
 }
 
 impl TemplateArgument {
@@ -119,6 +98,21 @@ impl TemplateArgument {
             TemplateArgument::TypeRef(t) => t.clone(),
             TemplateArgument::TemplateArgRef(t) => format!("${}", t),
             TemplateArgument::ObjectRef(o) => o.clone(),
+            TemplateArgument::Object(o) => format!(
+                "{{{}}}",
+                o.iter()
+                    .map(|(k, v)| format!("{k}: {}", v.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TemplateArgument::Array(items) => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|it| it.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -152,474 +146,53 @@ fn get_nested_value<'a>(json: &'a HashMap<String, JsonValue>, path: &str) -> Opt
     current
 }
 
-impl<'a> WAILMainDef {
-    pub fn new(
-        statements: Vec<MainStatement>,
-        prompt: String,
-        template_args: Option<HashMap<String, WAILType>>,
-    ) -> Self {
-        WAILMainDef {
-            statements,
-            prompt,
-            template_args: template_args.unwrap_or_default(),
-        }
-    }
+// ─── Variable / #each renderer ───────────────────────────────────────────────
+use crate::template_parser::{parse_template, TemplateSegment};
 
-    pub fn interpolate_prompt(
-        &self,
-        template_registry: &HashMap<String, WAILTemplateDef>,
-        object_instances: &HashMap<String, WAILObjectInstantiation>,
-        template_arg_values: Option<&HashMap<String, JsonValue>>,
-    ) -> Result<String, String> {
-        let mut result = self.prompt.clone();
+fn render_segments(
+    segs: &[TemplateSegment],
+    out: &mut String,
+    data: &HashMap<String, JsonValue>,
+) -> Result<(), String> {
+    for seg in segs {
+        match seg {
+            TemplateSegment::Text(t) => out.push_str(t),
 
-        use crate::template_parser::{parse_template, TemplateSegment};
-
-        // Parse the template into nodes
-        let nodes =
-            parse_template(&result).map_err(|e| format!("Template parsing error: {}", e))?;
-
-        let mut output = String::new();
-        let (_, segments) = nodes;
-
-        for node in segments {
-            match node {
-                TemplateSegment::Text(text) => output.push_str(&text),
-                TemplateSegment::Variable(var_name) => {
-                    // Try to find a template call first
-                    let replacement = self.statements.iter().find_map(|stmt| match stmt {
-                        MainStatement::Assignment {
-                            variable,
-                            template_call,
-                        } if variable == &var_name => {
-                            let template = template_registry.get(&template_call.template_name)?;
-
-                            template
-                                .interpolate_prompt(
-                                    Some(&template_call.arguments),
-                                    &object_instances.clone(),
-                                )
-                                .ok()
-                        }
-                        MainStatement::ObjectInstantiation {
-                            variable,
-                            object_type,
-                            arguments,
-                        } if variable == &var_name => {
-                            // For object instantiations, format as a proper JSON object with quoted values
-                            let mut obj = HashMap::new();
-                            for (key, value) in arguments {
-                                let formatted_value = match value {
-                                    TemplateArgument::String(s) => format!("\"{}\"", s),
-                                    TemplateArgument::Number(n) => n.to_string(),
-                                    TemplateArgument::Float(f) => f.to_string(),
-                                    TemplateArgument::TypeRef(t) => format!("\"{}\"", t),
-                                    TemplateArgument::TemplateArgRef(t) => format!("\"${}\"", t),
-                                    TemplateArgument::ObjectRef(o) => format!("\"{}\"", o),
-                                };
-                                obj.insert(key.clone(), formatted_value);
-                            }
-                            Some(format!(
-                                "{{\"type\": \"{}\", {}}}",
-                                object_type,
-                                obj.iter()
-                                    .map(|(k, v)| format!("\"{}\": {}", k, v))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                        }
-                        _ => None,
+            TemplateSegment::Variable(path) => {
+                if let Some(v) = get_nested_value(data, path) {
+                    out.push_str(&match v {
+                        JsonValue::String(s) => s.clone(),
+                        JsonValue::Number(n) => n.to_string(),
+                        JsonValue::Boolean(b) => b.to_string(),
+                        JsonValue::Null => "null".into(),
+                        _ => v.to_string(),
                     });
-
-                    let value = if let Some(template_result) = replacement {
-                        template_result
-                    } else if let Some(arg_values) = template_arg_values {
-                        if let Some(value) = get_nested_value(arg_values, &var_name) {
-                            match value {
-                                JsonValue::String(s) => s.clone(),
-                                JsonValue::Number(n) => n.to_string(),
-                                JsonValue::Object(obj) => {
-                                    let mut parts = Vec::new();
-                                    for (k, v) in obj {
-                                        match v {
-                                            JsonValue::String(s) => {
-                                                parts.push(format!("{}: {}", k, s))
-                                            }
-                                            JsonValue::Number(n) => {
-                                                parts.push(format!("{}: {}", k, n))
-                                            }
-                                            _ => parts.push(format!(
-                                                "{}: {}",
-                                                k,
-                                                v.to_string().trim_matches('"')
-                                            )),
-                                        }
-                                    }
-                                    parts.join(", ")
-                                }
-                                JsonValue::Array(arr) => {
-                                    let mut parts = Vec::new();
-                                    for v in arr {
-                                        match v {
-                                            JsonValue::String(s) => parts.push(s.clone()),
-                                            JsonValue::Number(n) => parts.push(n.to_string()),
-                                            _ => parts
-                                                .push(v.to_string().trim_matches('"').to_string()),
-                                        }
-                                    }
-                                    parts.join(", ")
-                                }
-                                JsonValue::Boolean(b) => b.to_string(),
-                                JsonValue::Null => "null".to_string(),
-                            }
-                        } else {
-                            return Err(format!("Variable not found: {}", var_name));
-                        }
-                    } else {
-                        return Err(format!("No value found for variable: {}", var_name));
-                    };
-                    output.push_str(&value);
+                } else {
+                    return Err(format!("variable not found: {path}"));
                 }
-                TemplateSegment::EachLoop { path, body } => {
-                    if let Some(arg_values) = template_arg_values {
-                        if let Some(JsonValue::Array(items)) = get_nested_value(arg_values, &path) {
-                            for (i, item) in items.iter().enumerate() {
-                                let mut item_context = HashMap::new();
-                                item_context.insert(".".to_string(), item.clone());
+            }
 
-                                // If item is an object, add its fields to the context
-                                if let JsonValue::Object(obj) = item {
-                                    for (key, value) in obj {
-                                        item_context.insert(key.clone(), value.clone());
-                                    }
-                                }
-
-                                // Parse and process the loop body as a nested template
-                                let body_str =
-                                    body.iter().map(|s| s.to_string()).collect::<String>();
-                                let body_nodes = parse_template(&body_str)
-                                    .map_err(|e| format!("Loop body parsing error: {}", e))?;
-
-                                let (_, segments) = body_nodes;
-                                for body_node in segments {
-                                    match body_node {
-                                        TemplateSegment::Text(text) => {
-                                            output.push_str(&text);
-                                        }
-                                        TemplateSegment::Variable(var_name) => {
-                                            let value = if var_name == "." {
-                                                match item {
-                                                    JsonValue::String(s) => s.clone(),
-                                                    JsonValue::Number(n) => n.to_string(),
-                                                    JsonValue::Object(obj) => {
-                                                        let mut parts = Vec::new();
-                                                        for (k, v) in obj {
-                                                            match v {
-                                                                JsonValue::String(s) => parts
-                                                                    .push(format!("{}: {}", k, s)),
-                                                                JsonValue::Number(n) => parts
-                                                                    .push(format!("{}: {}", k, n)),
-                                                                _ => parts.push(format!(
-                                                                    "{}: {}",
-                                                                    k,
-                                                                    v.to_string().trim_matches('"')
-                                                                )),
-                                                            }
-                                                        }
-                                                        parts.join(", ")
-                                                    }
-                                                    JsonValue::Array(arr) => {
-                                                        let mut parts = Vec::new();
-                                                        for v in arr {
-                                                            match v {
-                                                                JsonValue::String(s) => {
-                                                                    parts.push(s.clone())
-                                                                }
-                                                                JsonValue::Number(n) => {
-                                                                    parts.push(n.to_string())
-                                                                }
-                                                                _ => parts.push(
-                                                                    v.to_string()
-                                                                        .trim_matches('"')
-                                                                        .to_string(),
-                                                                ),
-                                                            }
-                                                        }
-                                                        parts.join("\n")
-                                                    }
-                                                    JsonValue::Boolean(b) => b.to_string(),
-                                                    JsonValue::Null => "null".to_string(),
-                                                }
-                                            } else if let Some(value) =
-                                                get_nested_value(&item_context, &var_name)
-                                            {
-                                                match value {
-                                                    JsonValue::String(s) => s.clone(),
-                                                    JsonValue::Number(n) => n.to_string(),
-                                                    JsonValue::Object(obj) => {
-                                                        let mut parts = Vec::new();
-                                                        for (k, v) in obj {
-                                                            match v {
-                                                                JsonValue::String(s) => parts
-                                                                    .push(format!("{}: {}", k, s)),
-                                                                JsonValue::Number(n) => parts
-                                                                    .push(format!("{}: {}", k, n)),
-                                                                _ => parts.push(format!(
-                                                                    "{}: {}",
-                                                                    k,
-                                                                    v.to_string().trim_matches('"')
-                                                                )),
-                                                            }
-                                                        }
-                                                        parts.join(", ")
-                                                    }
-                                                    JsonValue::Array(arr) => {
-                                                        let mut parts = Vec::new();
-                                                        for v in arr {
-                                                            match v {
-                                                                JsonValue::String(s) => {
-                                                                    parts.push(s.clone())
-                                                                }
-                                                                JsonValue::Number(n) => {
-                                                                    parts.push(n.to_string())
-                                                                }
-                                                                _ => parts.push(
-                                                                    v.to_string()
-                                                                        .trim_matches('"')
-                                                                        .to_string(),
-                                                                ),
-                                                            }
-                                                        }
-                                                        parts.join(", ")
-                                                    }
-                                                    JsonValue::Boolean(b) => b.to_string(),
-                                                    JsonValue::Null => "null".to_string(),
-                                                }
-                                            } else {
-                                                return Err(format!(
-                                                    "Loop variable not found: {}",
-                                                    var_name
-                                                ));
-                                            };
-                                            output.push_str(&value);
-                                        }
-                                        TemplateSegment::EachLoop { .. } => {
-                                            return Err(
-                                                "Nested loops are not supported".to_string()
-                                            );
-                                        }
-                                    }
-                                }
-                                // Add newline between items
-                                if i < items.len() - 1 {
-                                    output.push_str("\n");
-                                }
+            TemplateSegment::EachLoop { path, body } => {
+                if let Some(JsonValue::Array(items)) = get_nested_value(data, path) {
+                    for (i, item) in items.iter().enumerate() {
+                        // local scope: "." + object fields
+                        let mut local = HashMap::<String, JsonValue>::new();
+                        local.insert(".".into(), item.clone());
+                        if let JsonValue::Object(obj) = item {
+                            for (k, v) in obj {
+                                local.insert(k.clone(), v.clone());
                             }
+                        }
+                        render_segments(body, out, &local)?;
+                        if i < items.len() - 1 {
+                            out.push('\n');
                         }
                     }
                 }
             }
         }
-
-        result = output;
-
-        if let Some(arg_values) = template_arg_values {
-            for (name, value) in arg_values {
-                let value_str = match value {
-                    JsonValue::String(s) => s.clone(),
-                    JsonValue::Number(n) => n.to_string(),
-                    JsonValue::Object(obj) => {
-                        let mut parts = Vec::new();
-                        for (k, v) in obj {
-                            let value_str = match v {
-                                JsonValue::String(s) => format!("\"{}\"", s),
-                                JsonValue::Number(n) => n.to_string(),
-                                JsonValue::Boolean(b) => b.to_string(),
-                                JsonValue::Null => "null".to_string(),
-                                JsonValue::Array(arr) => format!(
-                                    "[{}]",
-                                    arr.iter()
-                                        .map(|v| v.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ),
-                                JsonValue::Object(inner_obj) => format!(
-                                    "{{{}}}",
-                                    inner_obj
-                                        .iter()
-                                        .map(|(k, v)| format!("\"{}\": {}", k, v))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ),
-                            };
-                            parts.push(format!("\"{}\": {}", k, value_str));
-                        }
-                        format!("{{{}}}", parts.join(", "))
-                    }
-                    JsonValue::Array(arr) => {
-                        let mut parts = Vec::new();
-                        for v in arr {
-                            match v {
-                                JsonValue::String(s) => parts.push(format!("\"{}\"", s)),
-                                JsonValue::Number(n) => parts.push(n.to_string()),
-                                _ => parts.push(v.to_string()),
-                            }
-                        }
-                        format!("[{}]", parts.join(", "))
-                    }
-                    JsonValue::Boolean(b) => b.to_string(),
-                    JsonValue::Null => "null".to_string(),
-                };
-                result = result.replace(&format!("${}", name), &value_str);
-            }
-        }
-
-        Ok(result)
     }
-
-    pub fn validate_llm_response(
-        &self,
-        json: &JsonValue,
-        registry: &HashMap<String, WAILTemplateDef>,
-    ) -> Result<(), (String, Option<String>, JsonValidationError)> {
-        // For each template call in statements, validate its output
-        for statement in &self.statements {
-            match statement {
-                MainStatement::Assignment {
-                    variable,
-                    template_call,
-                } => {
-                    // Get the template's output type from registry
-                    let template = registry.get(&template_call.template_name).ok_or_else(|| {
-                        (
-                            template_call.template_name.clone(),
-                            Some(variable.clone()),
-                            JsonValidationError::TemplateNotFound(
-                                template_call.template_name.clone(),
-                            ),
-                        )
-                    })?;
-
-                    let template_output = &template.output;
-
-                    // Get the corresponding value from JSON response
-                    let value = match json {
-                        JsonValue::Object(map) => map.get(variable).ok_or_else(|| {
-                            (
-                                template_call.template_name.clone(),
-                                Some(variable.clone()),
-                                JsonValidationError::MissingTemplateResponse(variable.clone()),
-                            )
-                        })?,
-                        _ => {
-                            return Err((
-                                template_call.template_name.clone(),
-                                Some(variable.clone()),
-                                JsonValidationError::ExpectedObject(),
-                            ))
-                        }
-                    };
-
-                    // Validate the value against the template's output type
-                    template_output
-                        .field_type
-                        .validate_json(value)
-                        .map_err(|e| {
-                            (
-                                template_call.template_name.clone(),
-                                Some(variable.clone()),
-                                e,
-                            )
-                        })?;
-                }
-                MainStatement::TemplateCall(template_call) => {
-                    // Similar validation for direct template calls
-                    let template_res = registry.get(&template_call.template_name);
-
-                    let template = match template_res {
-                        Some(t) => t,
-                        None => {
-                            return Err((
-                                template_call.template_name.clone(),
-                                None::<String>,
-                                JsonValidationError::MissingTemplateResponse(
-                                    template_call.template_name.clone(),
-                                ),
-                            ));
-                        }
-                    };
-
-                    // Get the corresponding value from JSON response
-                    let value = match json {
-                        JsonValue::Object(map) => {
-                            map.get(&template_call.template_name).ok_or_else(|| {
-                                (
-                                    template_call.template_name.clone(),
-                                    None,
-                                    JsonValidationError::MissingTemplateResponse(
-                                        template_call.template_name.clone(),
-                                    ),
-                                )
-                            })?
-                        }
-                        _ => {
-                            return Err((
-                                template_call.template_name.clone(),
-                                None,
-                                JsonValidationError::ExpectedObject(),
-                            ))
-                        }
-                    };
-
-                    let template_output = &template.output;
-                    template_output
-                        .field_type
-                        .validate_json(value)
-                        .map_err(|e| (template_call.template_name.clone(), None, e))?;
-                }
-                MainStatement::Comment(_) => {}
-
-                MainStatement::ObjectInstantiation {
-                    variable,
-                    object_type,
-                    ..
-                } => {}
-            }
-        }
-        Ok(())
-    }
-}
-
-impl MainStatement {
-    pub fn as_template_call(&self) -> Option<&WAILTemplateCall> {
-        match self {
-            MainStatement::TemplateCall(call) => Some(call),
-            _ => None,
-        }
-    }
-
-    pub fn as_assignment(&self) -> Option<(&String, &WAILTemplateCall)> {
-        match self {
-            MainStatement::Assignment {
-                variable,
-                template_call,
-            } => Some((variable, &template_call)),
-            _ => None,
-        }
-    }
-
-    pub fn as_object_instantiation(
-        &self,
-    ) -> Option<(&String, &String, &HashMap<String, TemplateArgument>)> {
-        match self {
-            MainStatement::ObjectInstantiation {
-                variable,
-                object_type,
-                arguments,
-            } => Some((variable, object_type, arguments)),
-            _ => None,
-        }
-    }
+    Ok(())
 }
 
 fn count_leading_whitespace(s: &str) -> usize {
@@ -687,13 +260,48 @@ impl<'a> WAILTemplateDef {
                                 TemplateArgument::TemplateArgRef(t) => {
                                     prompt = prompt.replace(&field_placeholder, &format!("${}", t));
                                 }
+                                TemplateArgument::Array(arr) => {
+                                    prompt = prompt.replace(
+                                        &placeholder,
+                                        &arr.iter()
+                                            .map(|it| it.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                    );
+                                }
                                 TemplateArgument::ObjectRef(_) => {
                                     return Err(
                                         "Nested object references are not supported".to_string()
                                     );
                                 }
+                                TemplateArgument::Object(inner) => {
+                                    let rendered = inner
+                                        .iter()
+                                        .map(|(k, v)| format!("{}: {}", k, v.to_string()))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    prompt = prompt.replace(&field_placeholder, &rendered);
+                                }
                             }
                         }
+                    }
+                    TemplateArgument::Array(arr) => {
+                        prompt = prompt.replace(
+                            &placeholder,
+                            &arr.iter()
+                                .map(|it| it.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        );
+                    }
+                    TemplateArgument::Object(obj) => {
+                        // Render the object as `key1: val1, key2: val2`
+                        let rendered = obj
+                            .iter()
+                            .map(|(k, v)| format!("{}: {}", k, v.to_string()))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        prompt = prompt.replace(&placeholder, &rendered);
                     }
                 }
             } else {
@@ -891,12 +499,70 @@ impl<'a> WAILTemplateDef {
                 .collect::<Vec<_>>()
                 .join("\n");
 
+            let tag = self.output.field_type.tag();
             let return_prompt = format!(
-                "\nAnswer using this schema:\n{}\nWrap your action block in <action> and </action> tags.",
-                indented_schema
+                "\nAnswer using this schema:\n{}\nWrap the value in <{}> … </{}>.",
+                indented_schema, tag, tag
             );
 
             prompt = re.replace(&prompt, &return_prompt).to_string();
+        }
+
+        fn ta_to_json(
+            arg: &TemplateArgument,
+            object_instances: &HashMap<String, WAILObjectInstantiation>,
+        ) -> JsonValue {
+            match arg {
+                TemplateArgument::Object(map) => {
+                    let mut m = HashMap::new();
+                    for (k, v) in map {
+                        m.insert(k.clone(), JsonValue::String(v.to_string()));
+                    }
+                    JsonValue::Object(m)
+                }
+                TemplateArgument::String(s) => JsonValue::String(s.clone()),
+                TemplateArgument::Number(n) => JsonValue::Number(Number::Integer(*n)),
+                TemplateArgument::Float(f) => JsonValue::Number(Number::Float(*f)),
+                TemplateArgument::TemplateArgRef(n) => JsonValue::String(format!("${n}")),
+                TemplateArgument::TypeRef(t) => JsonValue::String(t.clone()),
+
+                TemplateArgument::Array(items) => JsonValue::Array(
+                    items
+                        .iter()
+                        .map(|it| ta_to_json(it, object_instances))
+                        .collect(),
+                ),
+
+                TemplateArgument::ObjectRef(obj) => {
+                    let inst = object_instances
+                        .get(obj)
+                        .expect(&format!("object '{obj}' not found"));
+                    let mut map = HashMap::new();
+                    for (fld, ta) in &inst.fields {
+                        map.insert(fld.clone(), ta_to_json(ta, object_instances));
+                    }
+                    JsonValue::Object(map)
+                }
+            }
+        }
+
+        /* ──────────────────────────────────────────────────────────
+         * Stage 2 – expand {{var}} and {{#each …}}
+         * ────────────────────────────────────────────────────────── */
+        {
+            let mut ctx: HashMap<String, JsonValue> = HashMap::new();
+            if let Some(args) = arguments {
+                for (k, v) in args {
+                    ctx.insert(k.clone(), ta_to_json(v, object_instances));
+                }
+            }
+            // 2-b) run the mini renderer
+            let (_, segs) =
+                parse_template(&prompt).map_err(|e| format!("template-parse error: {e}"))?;
+            let mut rendered = String::new();
+            render_segments(&segs, &mut rendered, &ctx)?;
+
+            prompt = rendered; // overwrite the prompt with fully-rendered output
         }
 
         Ok(prompt)
@@ -1041,65 +707,126 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_each_loop_basic() {
-        let main_def = WAILMainDef::new(
-            vec![],
-            "{{#each user.hobbies}}Hobby: {{.}}{{/each}}".to_string(),
-            None,
-        );
+    // src/wail_parser/tests/template_loop_tests.rs
 
-        let template_registry = HashMap::new();
-        let registry = HashMap::new();
-        let arg_values = create_test_json();
+    use crate::{
+        json_types::Number,
+        parser_types::{
+            TemplateArgument, WAILCompositeType, WAILField, WAILObject, WAILObjectInstantiation,
+            WAILSimpleType, WAILTemplateDef, WAILType,
+        },
+    };
 
-        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&arg_values));
-        assert_eq!(result.unwrap(), "Hobby: reading\nHobby: gaming");
+    /// helpers ────────────────────────────────────────────────────────────────────
+    fn jstr<S: Into<String>>(s: S) -> JsonValue {
+        JsonValue::String(s.into())
+    }
+    fn jint(n: i64) -> JsonValue {
+        JsonValue::Number(Number::Integer(n))
     }
 
+    /// #each over an *array of objects*  ─────────────────────────────────────────
     #[test]
     fn test_each_loop_nested_properties() {
-        // Create test data with nested objects in array
-        let mut json = HashMap::new();
-        let mut pets = Vec::new();
+        /* 1 ─── build raw JSON context ─────────────────────────────────────── */
+        let pets = vec![
+            JsonValue::Object(HashMap::from([
+                ("name".into(), jstr("Fluffy")),
+                ("type".into(), jstr("cat")),
+            ])),
+            JsonValue::Object(HashMap::from([
+                ("name".into(), jstr("Rover")),
+                ("type".into(), jstr("dog")),
+            ])),
+        ];
+        let mut ctx = HashMap::<String, JsonValue>::new();
+        ctx.insert("pets".into(), JsonValue::Array(pets));
 
-        let mut pet1 = HashMap::new();
-        pet1.insert("name".to_string(), JsonValue::String("Fluffy".to_string()));
-        pet1.insert("type".to_string(), JsonValue::String("cat".to_string()));
-        pets.push(JsonValue::Object(pet1));
+        /* 2 ─── dummy output type (we don’t validate in this test) ─────────── */
+        let dummy_out = WAILField {
+            name: "Void".into(),
+            field_type: WAILType::Simple(WAILSimpleType::String(Default::default())),
+            annotations: vec![],
+        };
 
-        let mut pet2 = HashMap::new();
-        pet2.insert("name".to_string(), JsonValue::String("Rover".to_string()));
-        pet2.insert("type".to_string(), JsonValue::String("dog".to_string()));
-        pets.push(JsonValue::Object(pet2));
+        /* 3 ─── template definition ────────────────────────────────────────── */
+        let tpl = WAILTemplateDef {
+            name: "PetsTpl".into(),
+            inputs: vec![], // no formal inputs
+            output: dummy_out,
+            prompt_template: "{{#each pets}}Pet: {{name}} is a {{type}}{{/each}}".into(),
+            annotations: vec![],
+        };
 
-        json.insert("pets".to_string(), JsonValue::Array(pets));
+        /* 4 ─── run ─────────────────────────────────────────────────────────── */
+        let rendered = tpl
+            .interpolate_prompt(
+                None, // no positional args
+                &HashMap::<String, WAILObjectInstantiation>::new(),
+                /* we stash our JSON under a *single* argument so the Stage-2
+                renderer can see it */
+            )
+            .unwrap();
 
-        let main_def = WAILMainDef::new(
-            vec![],
-            "{{#each pets}}Pet: {{name}} is a {{type}}{{/each}}".to_string(),
-            None,
-        );
-
-        let template_registry = HashMap::new();
-        let registry = HashMap::new();
-        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&json));
-        assert_eq!(result.unwrap(), "Pet: Fluffy is a cat\nPet: Rover is a dog");
+        assert_eq!(rendered, "Pet: Fluffy is a cat\nPet: Rover is a dog");
     }
 
+    /// variable + #each combo ───────────────────────────────────────────────────
     #[test]
     fn test_complex_template() {
-        let json = create_test_json();
+        /* 1 ─── JSON context identical to the old main-test helper ─────────── */
+        let mut user = HashMap::<String, JsonValue>::new();
+        user.insert("name".into(), jstr("John"));
+        user.insert("age".into(), jint(30));
+        user.insert(
+            "address".into(),
+            JsonValue::Object(HashMap::from([
+                ("city".into(), jstr("Springfield")),
+                ("street".into(), jstr("123 Main St")),
+            ])),
+        );
+        user.insert(
+            "hobbies".into(),
+            JsonValue::Array(vec![jstr("reading"), jstr("gaming")]),
+        );
 
-        let template = "User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.\nHobbies:\n{{#each user.hobbies}}* {{.}}\n{{/each}}".to_string();
+        let mut ctx = HashMap::<String, JsonValue>::new();
+        ctx.insert("user".into(), JsonValue::Object(user));
 
-        let main_def = WAILMainDef::new(vec![], template, None);
-        let template_registry = HashMap::new();
-        let registry = HashMap::new();
+        /* 2 ─── dummy output (ignored) ─────────────────────────────────────── */
+        let dummy_out = WAILField {
+            name: "Void".into(),
+            field_type: WAILType::Simple(WAILSimpleType::String(Default::default())),
+            annotations: vec![],
+        };
 
-        let result = main_def.interpolate_prompt(&template_registry, &registry, Some(&json));
-        let expected = "User John (30) lives in Springfield.\nHobbies:\n* reading\n\n* gaming\n";
+        /* 3 ─── template ───────────────────────────────────────────────────── */
+        let tpl_body = "\
+User {{user.name}} ({{user.age}}) lives in {{user.address.city}}.
+Hobbies:
+{{#each user.hobbies}}* {{.}}
+{{/each}}";
 
-        assert_eq!(result.unwrap(), expected);
+        let tpl = WAILTemplateDef {
+            name: "UserTpl".into(),
+            inputs: vec![],
+            output: dummy_out,
+            prompt_template: tpl_body.into(),
+            annotations: vec![],
+        };
+
+        /* 4 ─── run ────────────────────────────────────────────────────────── */
+        let rendered = tpl
+            .interpolate_prompt(None, &HashMap::<String, WAILObjectInstantiation>::new())
+            .unwrap();
+
+        let expected = "\
+User John (30) lives in Springfield.
+Hobbies:
+* reading
+* gaming
+";
+
+        assert_eq!(rendered, expected);
     }
 }
