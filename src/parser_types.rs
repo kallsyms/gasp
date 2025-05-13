@@ -571,54 +571,7 @@ impl<'a> WAILTemplateDef {
 
 #[cfg(test)]
 mod tests {
-    use crate::wail_parser::{WAILFileType, WAILParser};
-
-    #[test]
-    fn test_parse_llm_output() {
-        let wail_schema = r#"
-    object Person {
-        name: String
-        age: Number
-        interests: String[]
-    }
-
-    template GetPerson(description: String) -> Person {
-        prompt: """{{description}}"""
-    }
-
-    main {
-        let person = GetPerson(description: "test");
-        prompt { 
-            {{person}} 
-        }
-    }"#;
-
-        let test_dir = std::env::current_dir().unwrap();
-        let parser = WAILParser::new(test_dir);
-        parser
-            .parse_wail_file(wail_schema.to_string(), WAILFileType::Application, true)
-            .unwrap();
-
-        // Test relaxed JSON parsing features
-        let cases = vec![
-            // Unquoted keys
-            r#"<action>{"person": {name: "Alice", age: 25, interests: ["coding"]}}</action>"#,
-            // Single quotes
-            r#"<action>{'person': {'name': 'Alice', 'age': 25, 'interests': ['coding']}}</action>"#,
-            // Trailing commas
-            r#"<action>{"person": {"name": "Alice", "age": 25, "interests": ["coding",],}}</action>"#,
-            // Mixed quotes and unquoted identifiers
-            r#"<action>{"person": {name: 'Alice', "age": 25, interests: ["coding"]}}</action>"#,
-        ];
-
-        for case in cases {
-            assert!(
-                parser.parse_llm_output(case).is_ok(),
-                "Failed to parse: {}",
-                case
-            );
-        }
-    }
+    // WAIL parser removed
 
     use super::*;
     use crate::json_types::JsonValue;
@@ -707,7 +660,7 @@ mod tests {
         );
     }
 
-    // src/wail_parser/tests/template_loop_tests.rs
+    // Template loop tests
 
     use crate::{
         json_types::Number,
