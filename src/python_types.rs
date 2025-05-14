@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple, PyType};
+use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 
 use crate::json_types::{JsonValue, Number};

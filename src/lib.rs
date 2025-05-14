@@ -11,9 +11,8 @@ mod tag_finder;
 
 use json_parser::StreamParser;
 use parser::PyParser;
-use pyo3::types::{PyDict, PyFloat, PyList, PyLong, PyString, PyType};
+use pyo3::types::{PyDict, PyList};
 use pyo3::Python;
-use std::collections::HashMap;
 
 use crate::json_types::{JsonValue, Number};
 
@@ -108,9 +107,8 @@ impl PyStreamParser {
     }
 }
 
-/// Create a pure Python implementation of Deserializable since
-/// it's easier to work with directly in Python
-fn create_deserializable_class(py: Python, module: &PyModule) -> PyResult<()> {
+/// Create a pure Python implementation of Deserializable and helper functions
+fn create_python_helpers(py: Python, module: &PyModule) -> PyResult<()> {
     let deserializable_code = r#"
 class Deserializable:
     """Base class for types that can be deserialized from JSON"""
@@ -175,8 +173,8 @@ fn gasp(py: Python, m: &PyModule) -> PyResult<()> {
     // Add typed parser
     m.add_class::<PyParser>()?;
 
-    // Add Deserializable base class implemented in Python
-    create_deserializable_class(py, m)?;
+    // Add Python helpers (Deserializable class and template functions)
+    create_python_helpers(py, m)?;
 
     Ok(())
 }

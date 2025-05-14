@@ -1,10 +1,9 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyType};
-use std::collections::HashMap;
+use pyo3::types::PyDict;
 
 use crate::json_parser::StreamParser;
 use crate::json_types::JsonValue;
-use crate::python_types::{json_to_python, python_to_json, PyTypeInfo};
+use crate::python_types::{json_to_python, PyTypeInfo};
 
 /// Wrapper for the StreamParser that handles typed conversions
 #[derive(Debug)]
