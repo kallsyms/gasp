@@ -107,63 +107,6 @@ impl PyStreamParser {
     }
 }
 
-/// Create a pure Python implementation of Deserializable and helper functions
-fn create_python_helpers(py: Python, module: &PyModule) -> PyResult<()> {
-    let deserializable_code = r#"
-class Deserializable:
-    """Base class for types that can be deserialized from JSON"""
-    
-    @classmethod
-    def __gasp_register__(cls):
-        """Register the type for deserialization"""
-        pass
-    
-    @classmethod
-    def __gasp_from_partial__(cls, partial_data):
-        """Create an instance from partial data"""
-        instance = cls()
-        for key, value in partial_data.items():
-            setattr(instance, key, value)
-        return instance
-    
-    def __gasp_update__(self, new_data):
-        """Update instance with new data"""
-        for key, value in new_data.items():
-            setattr(self, key, value)
-    
-    # Pydantic V2 compatibility methods
-    @classmethod
-    def model_validate(cls, obj):
-        """Pydantic V2 compatible validation method"""
-        return cls.__gasp_from_partial__(obj)
-    
-    @classmethod
-    def model_fields(cls):
-        """Return field information compatible with Pydantic V2"""
-        fields = {}
-        for name, type_hint in getattr(cls, "__annotations__", {}).items():
-            fields[name] = {"type": type_hint}
-        return fields
-    
-    def model_dump(self):
-        """Convert model to dict (Pydantic V2 compatible)"""
-        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
-
-# Explicitly add Deserializable to __all__ to make it importable
-__all__ = ['Deserializable', 'Parser', 'StreamParser']
-"#;
-
-    py.run(deserializable_code, None, Some(module.dict()))?;
-
-    // Make sure Deserializable is explicitly added to the module
-    module.add(
-        "Deserializable",
-        py.eval("Deserializable", None, Some(module.dict()))?,
-    )?;
-
-    Ok(())
-}
-
 /// Python module for parsing structured outputs into typed objects
 #[pymodule]
 fn gasp(py: Python, m: &PyModule) -> PyResult<()> {
@@ -172,9 +115,6 @@ fn gasp(py: Python, m: &PyModule) -> PyResult<()> {
 
     // Add typed parser
     m.add_class::<PyParser>()?;
-
-    // Add Python helpers (Deserializable class and template functions)
-    create_python_helpers(py, m)?;
 
     Ok(())
 }

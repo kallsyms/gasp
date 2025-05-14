@@ -225,7 +225,7 @@ def _extract_field_docs(cls: Type) -> Dict[str, str]:
     
     return result
 
-def interpolate_prompt(template: str, type_obj: Type, format_tag: str = "return_type") -> str:
+def interpolate_prompt(template: str, type_obj: Type, format_tag: str = "return_type", name: Optional[str] = None) -> str:
     """
     Replace {{format_tag}} in the template with format instructions for the type.
     
@@ -233,6 +233,7 @@ def interpolate_prompt(template: str, type_obj: Type, format_tag: str = "return_
         template: The prompt template with {{format_tag}} placeholders
         type_obj: The Python type to generate instructions for
         format_tag: The tag to replace (default: "return_type")
+        name: Optional name to use for the type tag (defaults to class name)
         
     Returns:
         The interpolated prompt
@@ -242,7 +243,7 @@ def interpolate_prompt(template: str, type_obj: Type, format_tag: str = "return_
     if placeholder not in template:
         return template
     
-    instructions = type_to_format_instructions(type_obj)
+    instructions = type_to_format_instructions(type_obj, name=name)
     instructions_with_header = f"Your response should be formatted as:\n\n{instructions}"
     
     return template.replace(placeholder, instructions_with_header)

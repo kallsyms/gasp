@@ -1,5 +1,10 @@
 # GASP - Type-Safe LLM Output Parser
 
+> **⚠️ MAJOR BREAKING CHANGES IN VERSION 1.0.0 ⚠️**  
+> Version 1.0.0 is a complete rewrite that removes WAIL entirely and introduces a new tag-based parsing approach.  
+> If you're using an older version of GASP, you'll need to significantly change your code to upgrade.  
+> See the [Migration Guide](#migrating-from-pre-10-versions) below.
+
 GASP is a Rust-based parser for turning LLM outputs into properly typed Python objects. It handles streaming JSON fragments, recovers from common LLM quirks, and makes structured data extraction actually pleasant.
 
 ## The Problem
@@ -114,6 +119,81 @@ The tag name directly indicates what Python type to instantiate:
 
 The parser ignores everything outside of the tags, so the LLM can provide explanations, context, or other text alongside the structured data.
 
+## Advanced Templating with Jinja2
+
+GASP provides built-in Jinja2 integration for more advanced prompt templating:
+
+```python
+from gasp import Deserializable, render_template
+from typing import List, Optional
+
+class Person(Deserializable):
+    """Information about a person"""
+    name: str
+    age: int
+    hobbies: Optional[List[str]] = None
+
+# Create a template with Jinja2 syntax
+template = """
+# {{ title }}
+
+Generate a {{ type_name|type_description }}.
+
+{% if include_format_instructions %}
+Your response must be formatted as:
+{{ person_type|format_type }}
+{% endif %}
+"""
+
+# Provide template context
+context = {
+    'title': 'Person Generator',
+    'type_name': Person,
+    'include_format_instructions': True,
+    'person_type': Person
+}
+
+# Render the template
+prompt = render_template(template, context)
+```
+
+### Available Jinja2 Filters
+
+- `format_type`: Generates format instructions for a type (e.g., `{{ my_type|format_type }}`)
+- `type_description`: Provides a human-readable description of a type, including docstring info
+
+### Template Files & Inheritance
+
+You can also use template files with inheritance:
+
+```python
+from gasp import render_file_template
+
+# Renders a template file with GASP filters included
+prompt = render_file_template("templates/person_prompt.j2", context)
+```
+
+### Direct Jinja2 Access
+
+For advanced cases, you can use the Jinja2 environment directly:
+
+```python
+from gasp.jinja_helpers import create_type_environment
+
+# Create a Jinja2 environment with GASP filters
+env = create_type_environment()
+
+# Add your own filters
+env.filters["my_filter"] = my_filter_function
+
+# Load templates from a directory
+env.loader = jinja2.FileSystemLoader("templates/")
+
+# Use directly with Jinja2 API
+template = env.get_template("my_template.j2")
+prompt = template.render(**context)
+```
+
 ## Customizing Behavior
 
 Need more control? You can customize type conversion, validation, and parsing behavior:
@@ -131,6 +211,78 @@ class CustomPerson(Deserializable):
         if "name" in partial_data:
             partial_data["name"] = partial_data["name"].title()
         return super().__gasp_from_partial__(partial_data)
+```
+
+## Migrating from pre-1.0 Versions
+
+Version 1.0.0 represents a complete architectural shift:
+
+### What's Been Removed
+
+- **WAIL Parser**: The entire WAIL language and validation system has been removed
+- **Schema Validation**: The schema-based approach has been replaced with typed parsing
+- **WAILGenerator**: This class and its API are no longer available
+- All WAIL-related files and examples
+
+### What's New
+
+- **Tag-Based Parsing**: Uses XML-like tags in LLM output to identify data types
+- **Type Annotations**: Direct use of Python type annotations to define structures
+- **Template Helpers**: Functions to generate format instructions from types
+- **Streaming Support**: Improved support for processing data as it arrives
+
+### Migration Steps
+
+1. Replace WAIL schema definitions with Python classes using type annotations
+2. Replace `WAILGenerator` with the new `Parser` class
+3. Update your prompts to use the new tag-based format
+4. Use `template_helpers.interpolate_prompt()` to generate type-aware prompts
+
+Example of old WAIL approach:
+```python
+schema = r'''
+object Response { name: String, age: Number }
+template GenerateResponse() -> Response { ... }
+'''
+generator = WAILGenerator()
+generator.load_wail(schema)
+(prompt, _, _) = generator.get_prompt()
+llm_response = your_llm_client.generate(prompt)
+parsed_data = generator.parse_llm_output(llm_response)
+```
+
+New approach:
+```python
+from gasp import Deserializable, Parser
+from gasp.template_helpers import interpolate_prompt
+
+class Person(Deserializable):
+    name: str
+    age: int
+
+# Create a template with a {{return_type}} placeholder
+template = """
+Generate a profile for a person who loves coding.
+
+{{return_type}}
+"""
+
+# Generate a complete prompt with type information
+prompt = interpolate_prompt(template, Person)
+print(prompt)
+# Output will include:
+# Your response should be formatted as:
+# <Person>{ "name": string, "age": number }</Person>
+
+# Send to your LLM
+llm_response = your_llm_client.generate(prompt)
+
+# Parse the tagged response
+parser = Parser(Person)
+parser.feed(llm_response)
+person = parser.validate()
+
+print(f"Created person: {person.name}, {person.age} years old")
 ```
 
 ## Contributing
