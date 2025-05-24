@@ -12,6 +12,7 @@ pub struct TypedStreamParser {
     type_info: Option<PyTypeInfo>,
     partial_data: Option<JsonValue>,
     is_done: bool,
+    pub expected_tags: Vec<String>,
 }
 
 /// Helper function to check if brackets/braces are balanced
@@ -32,24 +33,32 @@ fn count_brackets(s: &str) -> i32 {
 impl TypedStreamParser {
     pub fn new() -> Self {
         Self {
-            stream_parser: StreamParser::default(),
+            stream_parser: StreamParser::new(Vec::new()),
             type_info: None,
             partial_data: None,
             is_done: false,
+            expected_tags: Vec::new(),
         }
     }
 
     pub fn with_type(type_info: PyTypeInfo) -> Self {
         Self {
-            stream_parser: StreamParser::default(),
+            stream_parser: StreamParser::new(Vec::new()),
             type_info: Some(type_info),
             partial_data: None,
             is_done: false,
+            expected_tags: Vec::new(),
         }
     }
 
     /// Process a chunk of JSON data
     pub fn step(&mut self, chunk: &str) -> PyResult<Option<JsonValue>> {
+        // Make sure the stream parser is using our expected tags
+        if !self.expected_tags.is_empty() {
+            // Create a new stream parser with our expected tags if needed
+            self.stream_parser = StreamParser::new(self.expected_tags.clone());
+        }
+
         // Use the stream parser to process the chunk directly (with its tags)
         let result = match self.stream_parser.step(chunk) {
             Ok(val) => val,
@@ -88,7 +97,27 @@ impl TypedStreamParser {
     /// Convert current partial data to Python object using type info
     pub fn to_python_object(&self, py: Python) -> PyResult<Option<PyObject>> {
         match &self.partial_data {
-            Some(data) => Ok(Some(json_to_python(py, data, self.type_info.as_ref())?)),
+            Some(data) => {
+                // Process any complex nested types by examining the structure of the data
+                if let (Some(type_info), JsonValue::Object(map)) = (self.type_info.as_ref(), data) {
+                    if type_info.kind == crate::python_types::PyTypeKind::Class {
+                        if let Some(py_type_ref) = &type_info.py_type {
+                            let py_type_obj = py_type_ref.as_ref(py);
+
+                            // Create a specialized instance that properly handles nested objects
+                            return Ok(Some(crate::python_types::create_instance_from_json(
+                                py,
+                                py_type_obj,
+                                map,
+                                &type_info.fields,
+                            )?));
+                        }
+                    }
+                }
+
+                // Default conversion
+                Ok(Some(json_to_python(py, data, self.type_info.as_ref())?))
+            }
             None => Ok(None),
         }
     }
@@ -153,9 +182,33 @@ impl PyParser {
         match type_obj {
             Some(obj) => {
                 // Extract type info from the Python type
-                let type_info = PyTypeInfo::extract_from_python(obj)?;
+                let mut type_info = PyTypeInfo::extract_from_python(obj)?;
+
+                // Make sure we store the original Python type reference
+                if type_info.py_type.is_none() {
+                    type_info.py_type = Some(obj.into_py(py));
+                }
+
+                // Get the type name to use as the expected tag
+                let tag_name = if let Ok(name) = obj.getattr("__name__") {
+                    name.extract::<String>()?
+                } else {
+                    // Use the name from type_info if available, otherwise empty string
+                    type_info.name.clone()
+                };
+
+                // Create a parser that only looks for this specific tag
+                let tags = if !tag_name.is_empty() {
+                    vec![tag_name]
+                } else {
+                    vec![]
+                };
+
+                let mut stream_parser = TypedStreamParser::with_type(type_info);
+                stream_parser.expected_tags = tags;
+
                 Ok(Self {
-                    parser: TypedStreamParser::with_type(type_info),
+                    parser: stream_parser,
                 })
             }
             None => Ok(Self {
@@ -181,10 +234,33 @@ impl PyParser {
         };
 
         // Extract type information
-        let type_info = PyTypeInfo::extract_from_python(pydantic_model)?;
+        let mut type_info = PyTypeInfo::extract_from_python(pydantic_model)?;
+
+        // Make sure we store the original Python type reference
+        if type_info.py_type.is_none() {
+            type_info.py_type = Some(pydantic_model.into_py(py));
+        }
+
+        // Get the type name to use as the expected tag
+        let tag_name = if let Ok(name) = pydantic_model.getattr("__name__") {
+            name.extract::<String>()?
+        } else {
+            // Use the name from type_info if available, otherwise empty string
+            type_info.name.clone()
+        };
+
+        // Create a parser that only looks for this specific tag
+        let tags = if !tag_name.is_empty() {
+            vec![tag_name]
+        } else {
+            vec![]
+        };
+
+        let mut stream_parser = TypedStreamParser::with_type(type_info);
+        stream_parser.expected_tags = tags;
 
         Ok(Self {
-            parser: TypedStreamParser::with_type(type_info),
+            parser: stream_parser,
         })
     }
 
