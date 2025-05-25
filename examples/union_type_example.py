@@ -24,11 +24,11 @@ class ErrorResponse(Deserializable):
     details: Optional[List[str]] = None
     
 # Define a union type (can return either a success or error)
-ResponseType = Union[SuccessResponse, ErrorResponse]
+type ResponseType = Union[SuccessResponse, ErrorResponse]
 
 def main():
     # Generate format instructions for the union type, including structure examples
-    instructions = type_to_format_instructions(ResponseType, name="Response")
+    instructions = type_to_format_instructions(ResponseType)
     
     print("ENHANCED FORMAT INSTRUCTIONS WITH STRUCTURE EXAMPLES:")
     print("=" * 60)
@@ -47,7 +47,7 @@ def main():
     """
     
     # Interpolate with the union type - ensure we use the same "Response" tag name
-    prompt = interpolate_prompt(prompt_template, ResponseType, "return_type", name="Response")
+    prompt = interpolate_prompt(prompt_template, ResponseType, "return_type")
     operation = "Find user with ID 12345"
     
     print("\nGENERATED PROMPT:")
@@ -59,7 +59,7 @@ def main():
     
     # Success case
     success_response = """
-    <Response>
+    <ResponseType>
     {
       "status": "success",
       "data": {
@@ -69,12 +69,12 @@ def main():
       },
       "message": "User found successfully"
     }
-    </Response>
+    </ResponseType>
     """
     
     # Error case
     error_response = """
-    <Response>
+    <ResponseType>
     {
       "status": "error",
       "error_code": 404,
@@ -84,7 +84,7 @@ def main():
         "Try searching by username instead"
       ]
     }
-    </Response>
+    </ResponseType>
     """
     
     # For union types, Parser returns a dictionary that we need to convert to the appropriate class
@@ -92,39 +92,54 @@ def main():
     
     print("\nPARSING SUCCESS RESPONSE:")
     print("=" * 40)
-    # First, use the tag name to get the raw dictionary
-    success_parser = Parser(dict)  # Use dict instead of the union type
+    # Use the union type to parse
+    success_parser = Parser(ResponseType)
     success_parser.feed(success_response)
-    result_dict = success_parser.validate()
+    result = success_parser.validate()
     
-    if result_dict:
-        # Manual type discrimination based on 'status' field
-        if result_dict.get('status') == 'success':
-            # Convert to SuccessResponse
-            success_result = SuccessResponse.__gasp_from_partial__(result_dict)
-            print(f"Status: {success_result.status}")
-            print(f"Data: {success_result.data}")
-            print(f"Message: {success_result.message}")
+    if result:
+        print(f"Result type: {type(result).__name__}")
+        if isinstance(result, SuccessResponse):
+            print(f"Status: {result.status}")
+            print(f"Data: {result.data}")
+            print(f"Message: {result.message}")
+        elif isinstance(result, dict):
+            # If we get a dict back, we need to discriminate based on fields
+            if result.get('_type_name') == 'SuccessResponse' or result.get('status') == 'success':
+                success_result = SuccessResponse.__gasp_from_partial__(result)
+                print(f"Status: {success_result.status}")
+                print(f"Data: {success_result.data}")
+                print(f"Message: {success_result.message}")
         else:
-            print(f"Unexpected status: {result_dict.get('status')}")
+            print(f"Unexpected result type: {type(result)}")
+    else:
+        print("No result returned from parser")
     
     print("\nPARSING ERROR RESPONSE:")
     print("=" * 40)
-    error_parser = Parser(dict)  # Use dict instead of the union type
+    error_parser = Parser(ResponseType)  # Use the union type
     error_parser.feed(error_response)
-    result_dict = error_parser.validate()
+    result = error_parser.validate()
     
-    if result_dict:
-        # Manual type discrimination based on 'status' field
-        if result_dict.get('status') == 'error':
-            # Convert to ErrorResponse
-            error_result = ErrorResponse.__gasp_from_partial__(result_dict)
-            print(f"Status: {error_result.status}")
-            print(f"Error code: {error_result.error_code}")
-            print(f"Message: {error_result.message}")
-            print(f"Details: {', '.join(error_result.details or [])}")
+    if result:
+        print(f"Result type: {type(result).__name__}")
+        if isinstance(result, ErrorResponse):
+            print(f"Status: {result.status}")
+            print(f"Error code: {result.error_code}")
+            print(f"Message: {result.message}")
+            print(f"Details: {', '.join(result.details or [])}")
+        elif isinstance(result, dict):
+            # If we get a dict back, we need to discriminate based on fields
+            if result.get('_type_name') == 'ErrorResponse' or result.get('status') == 'error':
+                error_result = ErrorResponse.__gasp_from_partial__(result)
+                print(f"Status: {error_result.status}")
+                print(f"Error code: {error_result.error_code}")
+                print(f"Message: {error_result.message}")
+                print(f"Details: {', '.join(error_result.details or [])}")
         else:
-            print(f"Unexpected status: {result_dict.get('status')}")
+            print(f"Unexpected result type: {type(result)}")
+    else:
+        print("No result returned from parser")
 
 if __name__ == "__main__":
     main()

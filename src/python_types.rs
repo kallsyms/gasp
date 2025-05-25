@@ -164,6 +164,42 @@ impl PyTypeInfo {
         // Store reference to the original Python type
         let py_type_ref = py_type.into_py(py_type.py());
 
+        // Check if this is a type alias (created with 'type' statement)
+        if let Ok(value_attr) = py_type.getattr("__value__") {
+            // Check if the __value__ is a Union type
+            if let Ok(origin) = value_attr.getattr("__origin__") {
+                let origin_str = origin.str()?.extract::<String>()?;
+                if origin_str == "typing.Union" || origin_str.ends_with(".Union") {
+                    // This is a union type alias
+                    // Get the alias name
+                    let alias_name = if let Ok(name) = py_type.getattr("__name__") {
+                        name.extract::<String>()?
+                    } else {
+                        "Union".to_string()
+                    };
+
+                    // Extract the Union type arguments
+                    let type_args = if let Ok(args) = value_attr.getattr("__args__") {
+                        let args_seq = args.extract::<Vec<&PyAny>>()?;
+                        let mut type_infos = Vec::new();
+                        for arg in args_seq {
+                            type_infos.push(PyTypeInfo::extract_from_python(arg)?);
+                        }
+                        type_infos
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Return as a Union type with the alias name
+                    return Ok(PyTypeInfo::new(PyTypeKind::Union, alias_name)
+                        .with_module("typing".to_string())
+                        .with_origin("Union".to_string())
+                        .with_args(type_args)
+                        .with_py_type(py_type_ref));
+                }
+            }
+        }
+
         // Get type name
         let type_name = if let Ok(name) = py_type.getattr("__name__") {
             name.extract::<String>()?

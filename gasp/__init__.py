@@ -14,7 +14,7 @@ from .deserializable import Deserializable
 from .gasp import Parser as _RustParser, StreamParser
 
 # Default ignored tags
-DEFAULT_IGNORED_TAGS = ["think", "thinking", "system"]
+DEFAULT_IGNORED_TAGS = ["think", "thinking", "system", "thought"]
 
 def Parser(type_obj=None, ignored_tags=None):
     """
@@ -22,7 +22,7 @@ def Parser(type_obj=None, ignored_tags=None):
     
     Args:
         type_obj: The Python type to parse into
-        ignored_tags: List of tag names to ignore. Defaults to ["think", "thinking", "system"]
+        ignored_tags: List of tag names to ignore. Defaults to ["think", "thinking", "system", "thought]
     
     Returns:
         A Parser instance

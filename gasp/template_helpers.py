@@ -5,7 +5,7 @@ import inspect
 import typing
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, get_type_hints, get_origin, get_args
 
-def type_to_format_instructions(type_obj: Type, name: Optional[str] = None) -> str:
+def type_to_format_instructions(type_obj: Any, name: Optional[str] = None) -> str:
     """
     Generate format instructions for a Python type.
     
@@ -21,12 +21,35 @@ def type_to_format_instructions(type_obj: Type, name: Optional[str] = None) -> s
     
     # Main formatting function
     def format_type_with_examples(type_obj: Type, name: Optional[str] = None) -> str:
-        tag_name = name or getattr(type_obj, "__name__", "Object")
+        # Check origin first to handle type aliases properly
+        origin = get_origin(type_obj)
+        
+        # Special handling for type aliases (created with 'type' statement)
+        # These don't have get_origin() returning Union, but have __value__ attribute
+        if hasattr(type_obj, '__value__'):
+            # This is a type alias, use the actual type
+            actual_type = type_obj.__value__
+            origin = get_origin(actual_type)
+            # Use the type alias name if no explicit name provided
+            if not name and hasattr(type_obj, '__name__'):
+                tag_name = type_obj.__name__
+            else:
+                tag_name = name or "Object"
+        else:
+            # Determine tag name based on type
+            if name:
+                tag_name = name
+            else:
+                # For other types, try to get __name__ attribute
+                tag_name = getattr(type_obj, "__name__", "Object")
         
         # Handle Union types
-        origin = get_origin(type_obj)
         if origin is Union:
-            return _format_union_type(type_obj, tag_name, structure_examples)
+            # If we detected a union through type alias, use the actual type
+            if hasattr(type_obj, '__value__'):
+                return _format_union_type(type_obj.__value__, tag_name, structure_examples)
+            else:
+                return _format_union_type(type_obj, tag_name, structure_examples)
         
         # Handle List types
         if origin is list:
@@ -64,7 +87,11 @@ def type_to_format_instructions(type_obj: Type, name: Optional[str] = None) -> s
 
 def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for a class type."""
-    hints = get_type_hints(cls)
+    try:
+        hints = get_type_hints(cls)
+    except TypeError:
+        # If we can't get type hints, return empty object
+        return f"<{tag_name}>{{}}</{tag_name}>"
     
     # Handle empty classes
     if not hints:
@@ -136,7 +163,7 @@ def _is_complex_type(type_obj: Type) -> bool:
     elif origin is list:
         # For lists, check if the item type is complex
         args = get_args(type_obj)
-        return args and _is_complex_type(args[0])
+        return bool(args) and _is_complex_type(args[0])
     elif origin is dict:
         # For dicts, check if the value type is complex
         args = get_args(type_obj)
@@ -145,7 +172,7 @@ def _is_complex_type(type_obj: Type) -> bool:
     # Other types with type hints are considered complex
     try:
         hints = get_type_hints(type_obj)
-        return bool(hints)
+        return bool(hints) if isinstance(hints, dict) else False
     except (TypeError, AttributeError):
         # If we can't get type hints, it's probably not a complex type
         return False
@@ -209,6 +236,66 @@ def _generate_structure_example(type_obj: Type) -> str:
         # If we can't get type hints, just return a generic object
         return "{...}"
 
+def _generate_structure_example_with_type_name(type_obj: Type, type_name: str) -> str:
+    """Generate a structure example for a complex type with _type_name discrimination field."""
+    # Handle different kinds of complex types
+    origin = get_origin(type_obj)
+    
+    if origin is Union:
+        # For unions, generate examples for each option
+        args = get_args(type_obj)
+        options = []
+        for i, arg in enumerate(args):
+            if arg is not type(None):  # Skip None type
+                arg_name = getattr(arg, "__name__", f"Type{i+1}")
+                options.append(f"// Option {i+1}:\n{_generate_structure_example_with_type_name(arg, arg_name)}")
+        
+        return "\n\n- OR -\n\n".join(options)
+    
+    elif origin is list:
+        # For lists, provide example content
+        args = get_args(type_obj)
+        if args and _is_complex_type(args[0]):
+            item_example = _generate_structure_example_with_type_name(args[0], type_name)
+            return f"[\n  {item_example},\n  ...\n]"
+        else:
+            return "[...]"
+    
+    elif origin is dict:
+        # For dicts, provide example keys and values
+        args = get_args(type_obj)
+        if len(args) == 2:
+            key_type, value_type = args
+            key_example = _get_type_description(key_type, simple=True)
+            if _is_complex_type(value_type):
+                value_example = _generate_structure_example_with_type_name(value_type, type_name)
+                return f'{{\n  "_type_name": "{type_name}",\n  "{key_example}": {value_example},\n  ...\n}}'
+            else:
+                value_example = _get_type_description(value_type, simple=True)
+                return f'{{\n  "_type_name": "{type_name}",\n  "{key_example}": {value_example},\n  ...\n}}'
+        else:
+            return f'{{\n  "_type_name": "{type_name}",\n  ...\n}}'
+    
+    # For classes, get their field types and add _type_name
+    try:
+        hints = get_type_hints(type_obj)
+        if not hints:
+            return f'{{\n  "_type_name": "{type_name}"\n}}'
+            
+        fields = [f'  "_type_name": "{type_name}"']
+        for field_name, field_type in hints.items():
+            if field_name.startswith('_'):
+                continue
+                
+            field_type_str = _get_type_description(field_type)
+            fields.append(f'  "{field_name}": {field_type_str}')
+            
+        fields_str = ",\n".join(fields)
+        return f"{{\n{fields_str}\n}}"
+    except (TypeError, AttributeError):
+        # If we can't get type hints, just return a generic object with _type_name
+        return f'{{\n  "_type_name": "{type_name}"\n}}'
+
 def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for a Union type."""
     args = get_args(union_type)
@@ -226,9 +313,9 @@ def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict
             arg_name = getattr(arg, "__name__", f"Type{i+1}")
             option_content = f"{arg_name} object"
             
-            # Add the type to structure examples
+            # Add the type to structure examples with _type_name discrimination field
             if arg_name not in structure_examples:
-                structure_examples[arg_name] = _generate_structure_example(arg)
+                structure_examples[arg_name] = _generate_structure_example_with_type_name(arg, arg_name)
         else:
             # For simple types, generate standard format instructions
             option_format = type_to_format_instructions(arg, tag_name)
@@ -372,11 +459,14 @@ def _extract_field_docs(cls: Type) -> Dict[str, str]:
     """Extract field documentation from class docstring."""
     result = {}
     
-    if not cls.__doc__:
+    if not hasattr(cls, '__doc__') or not cls.__doc__:
         return result
     
     # Try to find field descriptions in docstring
-    lines = inspect.getdoc(cls).split('\n')
+    doc = inspect.getdoc(cls)
+    if not doc:
+        return result
+    lines = doc.split('\n')
     current_field = None
     
     for line in lines:
@@ -408,7 +498,7 @@ def _extract_field_docs(cls: Type) -> Dict[str, str]:
     
     return result
 
-def interpolate_prompt(template: str, type_obj: Type, format_tag: str = "return_type", name: Optional[str] = None) -> str:
+def interpolate_prompt(template: str, type_obj: Any, format_tag: str = "return_type", name: Optional[str] = None) -> str:
     """
     Replace {{format_tag}} in the template with format instructions for the type.
     

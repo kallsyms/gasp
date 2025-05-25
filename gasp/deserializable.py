@@ -50,9 +50,14 @@ class Deserializable:
                             continue
                 
                 # Handle single nested object
-                elif issubclass(field_type, Deserializable) and isinstance(value, dict):
-                    setattr(instance, key, field_type.__gasp_from_partial__(value))
-                    continue
+                # Need to check if field_type is actually a class before calling issubclass
+                try:
+                    if isinstance(field_type, type) and issubclass(field_type, Deserializable) and isinstance(value, dict):
+                        setattr(instance, key, field_type.__gasp_from_partial__(value))
+                        continue
+                except TypeError:
+                    # field_type is not a class, skip the check
+                    pass
                     
             # Default case - set value directly
             setattr(instance, key, value)
