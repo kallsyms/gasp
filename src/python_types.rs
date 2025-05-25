@@ -376,6 +376,35 @@ pub fn json_to_python(
         JsonValue::Object(map) => {
             let dict = PyDict::new(py);
 
+            // If we have type info for a union, try to determine which type to use
+            if let Some(PyTypeInfo {
+                kind: PyTypeKind::Union,
+                args,
+                ..
+            }) = type_info
+            {
+                // First, check if there's a _type_name field to disambiguate
+                if let Some(JsonValue::String(type_name)) = map.get("_type_name") {
+                    // Find the matching type in the union args
+                    for arg in args {
+                        if &arg.name == type_name {
+                            // Recursively convert with the specific type
+                            return json_to_python(py, value, Some(arg));
+                        }
+                    }
+                }
+
+                // If no _type_name or no match found, try to disambiguate based on fields
+                for arg in args {
+                    if arg.kind == PyTypeKind::Class && arg.matches(value) {
+                        // This type matches based on fields, use it
+                        return json_to_python(py, value, Some(arg));
+                    }
+                }
+
+                // If we still can't determine, fall through to dict
+            }
+
             // If we have type info for a class, try to construct the class
             if let Some(PyTypeInfo {
                 kind: PyTypeKind::Class,
