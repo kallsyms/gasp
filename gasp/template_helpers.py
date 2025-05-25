@@ -29,6 +29,17 @@ def type_to_format_instructions(type_obj: Any, name: Optional[str] = None) -> st
         if hasattr(type_obj, '__value__'):
             # This is a type alias, use the actual type
             actual_type = type_obj.__value__
+            
+            # Check if it's a types.UnionType (Python 3.12 X = Y | Z syntax)
+            if type(actual_type).__name__ == 'UnionType':
+                # Use the type alias name if no explicit name provided
+                if not name and hasattr(type_obj, '__name__'):
+                    tag_name = type_obj.__name__
+                else:
+                    tag_name = name or "Object"
+                # Format as union using __args__
+                return _format_union_type_from_args(actual_type.__args__, tag_name, structure_examples)
+            
             origin = get_origin(actual_type)
             # Use the type alias name if no explicit name provided
             if not name and hasattr(type_obj, '__name__'):
@@ -90,12 +101,19 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
     try:
         hints = get_type_hints(cls)
     except TypeError:
-        # If we can't get type hints, return empty object
-        return f"<{tag_name}>{{}}</{tag_name}>"
+        # If we can't get type hints, treat as empty class
+        hints = {}
     
-    # Handle empty classes
+    # Always treat classes as complex types, even if empty
+    # Get the class name
+    class_name = getattr(cls, "__name__", "Object")
+    
+    # Add to structure examples with _type_name
     if not hints:
-        return f"<{tag_name}>{{}}</{tag_name}>"
+        # Empty class still gets a structure example
+        structure_examples[class_name] = f'{{\n  "_type_name": "{class_name}"\n}}'
+        # Return the class object format
+        return f"<{tag_name}>\n{class_name} object\n</{tag_name}>"
     
     # Get docstrings for fields if available
     field_docs = _extract_field_docs(cls)
@@ -142,11 +160,13 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
     
     fields_str = ",\n".join(fields)
     
-    # Add this class type to structure examples
-    class_name = getattr(cls, "__name__", "Object")
-    structure_examples[class_name] = f"{{\n{fields_str}\n}}"
+    # Add this class type to structure examples with _type_name
+    fields_with_type_name = [f'  "_type_name": "{class_name}"'] + fields
+    fields_str_with_type_name = ",\n".join(fields_with_type_name)
+    structure_examples[class_name] = f"{{\n{fields_str_with_type_name}\n}}"
     
-    return f"<{tag_name}>{{\n{fields_str}\n}}</{tag_name}>"
+    # Return the class object format
+    return f"<{tag_name}>\n{class_name} object\n</{tag_name}>"
 
 def _is_complex_type(type_obj: Type) -> bool:
     """Determine if a type is complex and should have a structure example."""
@@ -169,10 +189,11 @@ def _is_complex_type(type_obj: Type) -> bool:
         args = get_args(type_obj)
         return len(args) == 2 and _is_complex_type(args[1])
     
-    # Other types with type hints are considered complex
+    # Check if it's a class type (including empty classes)
     try:
+        # If we can get type hints, it's a class (even if hints is empty)
         hints = get_type_hints(type_obj)
-        return bool(hints) if isinstance(hints, dict) else False
+        return isinstance(hints, dict)  # True for both empty and non-empty classes
     except (TypeError, AttributeError):
         # If we can't get type hints, it's probably not a complex type
         return False
@@ -296,10 +317,8 @@ def _generate_structure_example_with_type_name(type_obj: Type, type_name: str) -
         # If we can't get type hints, just return a generic object with _type_name
         return f'{{\n  "_type_name": "{type_name}"\n}}'
 
-def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
-    """Format instructions for a Union type."""
-    args = get_args(union_type)
-    
+def _format_union_type_from_args(args: Tuple[Type, ...], tag_name: str, structure_examples: Dict[str, str]) -> str:
+    """Format instructions for a Union type from args tuple."""
     # Handle Optional types specially
     if type(None) in args and len(args) == 2:
         non_none_type = next(arg for arg in args if arg is not type(None))
@@ -334,6 +353,11 @@ def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict
     all_options = separator.join(options)
     
     return f"<{tag_name}>\n{all_options}\n</{tag_name}>"
+
+def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
+    """Format instructions for a Union type."""
+    args = get_args(union_type)
+    return _format_union_type_from_args(args, tag_name, structure_examples)
 
 def _format_optional_type(type_obj: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for an Optional type."""
