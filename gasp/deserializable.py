@@ -85,4 +85,33 @@ class Deserializable:
     
     def model_dump(self):
         """Convert model to dict (Pydantic V2 compatible)"""
-        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+        result = {}
+        for k, v in self.__dict__.items():
+            if k.startswith('_'):
+                continue
+                
+            # Recursively dump nested Deserializable objects
+            if isinstance(v, Deserializable):
+                result[k] = v.model_dump()
+            # Handle lists that might contain Deserializable objects
+            elif isinstance(v, list):
+                dumped_list = []
+                for item in v:
+                    if isinstance(item, Deserializable):
+                        dumped_list.append(item.model_dump())
+                    else:
+                        dumped_list.append(item)
+                result[k] = dumped_list
+            # Handle dictionaries that might contain Deserializable objects
+            elif isinstance(v, dict):
+                dumped_dict = {}
+                for dict_k, dict_v in v.items():
+                    if isinstance(dict_v, Deserializable):
+                        dumped_dict[dict_k] = dict_v.model_dump()
+                    else:
+                        dumped_dict[dict_k] = dict_v
+                result[k] = dumped_dict
+            else:
+                result[k] = v
+                
+        return result
