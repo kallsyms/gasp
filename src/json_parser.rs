@@ -2,7 +2,7 @@ use crate::json_tok::{Kind, Tok, Tokenizer};
 use crate::json_types::{JsonError, JsonValue, Number};
 use crate::tag_finder::{TagEvent, TagFinder};
 use std::collections::{HashMap, HashSet};
-use std::default;
+use std::{default, vec};
 
 use crate::json_sax_scanner::{Event, Scanner, Step as ScanStep};
 
@@ -649,18 +649,20 @@ pub struct StreamParser {
     inner: Parser,
     done: bool,
     wanted: HashSet<String>,
+    ignored: HashSet<String>,
 }
 
 impl default::Default for StreamParser {
     fn default() -> Self {
-        Self::new(vec![])
+        Self::new(vec![], vec![])
     }
 }
 
 impl StreamParser {
-    pub fn new(tags: Vec<String>) -> Self {
+    pub fn new(tags: Vec<String>, ignored: Vec<String>) -> Self {
         Self {
             wanted: tags.into_iter().collect(),
+            ignored: ignored.into_iter().collect(),
             tagger: TagFinder::new(),
             inner: Parser::new(true), // keeps its own scanner
             done: false,
@@ -1505,7 +1507,7 @@ mod tests {
         // Where tags and JSON elements are split in unusual places
 
         // Create a parser that's looking for ReportSubsystems tags
-        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()]);
+        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![]);
 
         // Add debug logging to track the parsing process
         println!("\nTesting LLM token fragmentation:");
@@ -1603,7 +1605,7 @@ mod tests {
         // the opening tag is broken into individual parts with spaces
 
         // Create a parser that's looking for ReportSubsystems tags
-        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()]);
+        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![]);
 
         println!("\nTesting extreme tag fragmentation - single character tokens:");
 

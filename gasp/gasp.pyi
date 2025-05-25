@@ -40,8 +40,14 @@ class Deserializable:
 class Parser(Generic[T]):
     """Parser for incrementally building typed objects from JSON streams"""
     
-    def __init__(self, type_obj: Optional[Type[T]] = None) -> None:
-        """Initialize a parser for the given type"""
+    def __init__(self, type_obj: Optional[Type[T]] = None, ignored_tags: Optional[List[str]] = None) -> None:
+        """
+        Initialize a parser for the given type.
+        
+        Args:
+            type_obj: The Python type to parse into
+            ignored_tags: List of tag names to ignore. Defaults to ["think", "thinking", "system"]
+        """
         pass
     
     @staticmethod

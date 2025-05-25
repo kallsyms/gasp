@@ -33,7 +33,7 @@ fn count_brackets(s: &str) -> i32 {
 impl TypedStreamParser {
     pub fn new() -> Self {
         Self {
-            stream_parser: StreamParser::new(Vec::new()),
+            stream_parser: StreamParser::new(Vec::new(), Vec::new()),
             type_info: None,
             partial_data: None,
             is_done: false,
@@ -43,7 +43,7 @@ impl TypedStreamParser {
 
     pub fn with_type(type_info: PyTypeInfo) -> Self {
         Self {
-            stream_parser: StreamParser::new(Vec::new()),
+            stream_parser: StreamParser::new(Vec::new(), Vec::new()),
             type_info: Some(type_info),
             partial_data: None,
             is_done: false,
@@ -53,12 +53,6 @@ impl TypedStreamParser {
 
     /// Process a chunk of JSON data
     pub fn step(&mut self, chunk: &str) -> PyResult<Option<JsonValue>> {
-        // Make sure the stream parser is using our expected tags
-        if !self.expected_tags.is_empty() {
-            // Create a new stream parser with our expected tags if needed
-            self.stream_parser = StreamParser::new(self.expected_tags.clone());
-        }
-
         // Use the stream parser to process the chunk directly (with its tags)
         let result = match self.stream_parser.step(chunk) {
             Ok(val) => val,
@@ -177,8 +171,12 @@ pub struct PyParser {
 #[pymethods]
 impl PyParser {
     #[new]
-    #[pyo3(text_signature = "(type_obj=None)")]
-    fn new(py: Python, type_obj: Option<&PyAny>) -> PyResult<Self> {
+    #[pyo3(text_signature = "(type_obj=None, ignored_tags=None)")]
+    fn new(
+        py: Python,
+        type_obj: Option<&PyAny>,
+        ignored_tags: Option<Vec<String>>,
+    ) -> PyResult<Self> {
         match type_obj {
             Some(obj) => {
                 // Extract type info from the Python type
@@ -204,16 +202,22 @@ impl PyParser {
                     vec![]
                 };
 
-                let mut stream_parser = TypedStreamParser::with_type(type_info);
-                stream_parser.expected_tags = tags;
+                // Create the stream parser with ignored tags
+                let ignored = ignored_tags.unwrap_or_else(Vec::new);
+                let mut parser = TypedStreamParser::with_type(type_info);
+                parser.expected_tags = tags.clone();
+                parser.stream_parser = StreamParser::new(tags, ignored);
 
-                Ok(Self {
-                    parser: stream_parser,
-                })
+                Ok(Self { parser })
             }
-            None => Ok(Self {
-                parser: TypedStreamParser::new(),
-            }),
+            None => {
+                // Create parser without type info but with ignored tags
+                let ignored = ignored_tags.unwrap_or_else(Vec::new);
+                let mut parser = TypedStreamParser::new();
+                parser.stream_parser = StreamParser::new(Vec::new(), ignored);
+
+                Ok(Self { parser })
+            }
         }
     }
 
