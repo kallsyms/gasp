@@ -171,12 +171,8 @@ pub struct PyParser {
 #[pymethods]
 impl PyParser {
     #[new]
-    #[pyo3(text_signature = "(type_obj=None, ignored_tags=None)")]
-    fn new(
-        py: Python,
-        type_obj: Option<&PyAny>,
-        ignored_tags: Option<Vec<String>>,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (type_obj=None, ignored_tags=vec!["think".to_string(), "thinking".to_string(), "system".to_string(), "thought".to_string()]))]
+    fn new(py: Python, type_obj: Option<&PyAny>, ignored_tags: Vec<String>) -> PyResult<Self> {
         match type_obj {
             Some(obj) => {
                 // Extract type info from the Python type
@@ -203,18 +199,16 @@ impl PyParser {
                 };
 
                 // Create the stream parser with ignored tags
-                let ignored = ignored_tags.unwrap_or_else(Vec::new);
                 let mut parser = TypedStreamParser::with_type(type_info);
                 parser.expected_tags = tags.clone();
-                parser.stream_parser = StreamParser::new(tags, ignored);
+                parser.stream_parser = StreamParser::new(tags, ignored_tags);
 
                 Ok(Self { parser })
             }
             None => {
                 // Create parser without type info but with ignored tags
-                let ignored = ignored_tags.unwrap_or_else(Vec::new);
                 let mut parser = TypedStreamParser::new();
-                parser.stream_parser = StreamParser::new(Vec::new(), ignored);
+                parser.stream_parser = StreamParser::new(Vec::new(), ignored_tags);
 
                 Ok(Self { parser })
             }

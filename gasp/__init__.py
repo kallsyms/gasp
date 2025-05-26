@@ -11,25 +11,7 @@ from . import jinja_helpers
 from .deserializable import Deserializable
 
 # Import native components from the Rust module
-from .gasp import Parser as _RustParser, StreamParser
-
-# Default ignored tags
-DEFAULT_IGNORED_TAGS = ["think", "thinking", "system", "thought"]
-
-def Parser(type_obj=None, ignored_tags=None):
-    """
-    Create a Parser with Python-level defaults for ignored tags.
-    
-    Args:
-        type_obj: The Python type to parse into
-        ignored_tags: List of tag names to ignore. Defaults to ["think", "thinking", "system", "thought]
-    
-    Returns:
-        A Parser instance
-    """
-    if ignored_tags is None:
-        ignored_tags = DEFAULT_IGNORED_TAGS
-    return _RustParser(type_obj, ignored_tags)
+from .gasp import Parser, StreamParser
 
 # Import key Jinja helpers for convenience
 from .jinja_helpers import render_template, render_file_template

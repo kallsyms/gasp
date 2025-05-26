@@ -96,7 +96,7 @@ def pydantic_example():
     
     # --- CREATING PARSER FROM PYDANTIC MODEL ---
     # GASP has special support for Pydantic models
-    parser = Parser().from_pydantic(PydanticPerson)
+    parser = Parser.from_pydantic(PydanticPerson)
     
     # Feed chunks with proper tags to indicate types  
     # Note that the tag name must match the Pydantic class name
