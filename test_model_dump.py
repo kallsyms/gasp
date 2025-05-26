@@ -4,6 +4,7 @@ Test the recursive model_dump functionality
 """
 
 from gasp import Deserializable
+from typing import List
 
 class Child(Deserializable):
     name: str
