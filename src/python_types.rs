@@ -423,7 +423,7 @@ impl PyTypeInfo {
                         .with_module(module_name.unwrap_or_else(|| "builtins".to_string()))
                         .with_fields(fields)
                         .with_py_type(py_type_ref));
-                } else if let Ok(bases) = py_type.getattr("__bases__") {
+                } else if let Ok(_bases) = py_type.getattr("__bases__") {
                     // This is likely a class type too
                     return Ok(PyTypeInfo::new(PyTypeKind::Class, type_name)
                         .with_module(module_name.unwrap_or_else(|| "builtins".to_string()))
