@@ -144,49 +144,40 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Clone)] // Removed Default, added Clone
+#[derive(Debug, Default, Clone)]
 pub struct Builder {
     pub stack: Vec<Frame>,
     path: Vec<PathItem>, // mirrors stack depth for snapshot emissions
-    target_type_info: Option<PyTypeInfo>, // Added target_type_info
+                         // target_type_info: Option<PyTypeInfo>, // REMOVED
 }
 
 impl Builder {
-    pub fn new(target_type_info: Option<PyTypeInfo>) -> Self { // Updated constructor
+    pub fn new() -> Self {
+        // Updated constructor
         Self {
             stack: Vec::new(),
             path: Vec::new(),
-            target_type_info,
+            // target_type_info: None, // REMOVED
         }
     }
 
     // Helper to get the expected type for an item in the current array context
     // This version is for use in feed_event for snapshot suppression.
-    fn get_expected_type_for_feed_event_scalar_snapshot(&self) -> Option<&PyTypeInfo> {
+    fn get_expected_type_for_feed_event_scalar_snapshot<'a>(
+        &self,
+        root_target_type: Option<&'a PyTypeInfo>,
+    ) -> Option<&'a PyTypeInfo> {
         // Check if the parent frame (one level up from current scalar) is an Array.
-        if self.stack.len() >= 2 { // Need at least a parent and current scalar frame
+        if self.stack.len() >= 2 {
+            // Need at least a parent and current scalar frame
             if let Some(Frame::Arr { .. }) = self.stack.get(self.stack.len() - 2) {
                 // Parent is an array. What is its element type?
-                // This simplified version assumes the root target_type_info is List[X]
+                // This simplified version assumes the root_target_type is List[X]
                 // and we are in that top-level list.
-                // A full solution would trace self.path through self.target_type_info.
-                if let Some(root_type) = &self.target_type_info {
-                    if root_type.kind == PyTypeKind::List && !root_type.args.is_empty() {
-                        return Some(&root_type.args[0]);
-                    }
-                }
-            }
-        }
-        None
-    }
-    
-    // Helper for Builder::finish to determine expected item type if stack is [Arr, Scalar]
-    fn get_expected_type_for_array_item_in_finish(&self) -> Option<&PyTypeInfo> {
-        if self.stack.len() == 2 { // Specifically for [Arr, ScalarFrame] stack
-            if let Some(Frame::Arr { .. }) = self.stack.first() {
-                 if let Some(root_type) = &self.target_type_info {
-                    if root_type.kind == PyTypeKind::List && !root_type.args.is_empty() {
-                        return Some(&root_type.args[0]);
+                // A full solution would trace self.path through root_target_type.
+                if let Some(rt_type) = root_target_type {
+                    if rt_type.kind == PyTypeKind::List && !rt_type.args.is_empty() {
+                        return Some(&rt_type.args[0]);
                     }
                 }
             }
@@ -194,6 +185,23 @@ impl Builder {
         None
     }
 
+    // Helper for Builder::finish to determine expected item type if stack is [Arr, Scalar]
+    fn get_expected_type_for_array_item_in_finish<'a>(
+        &self,
+        root_target_type: Option<&'a PyTypeInfo>,
+    ) -> Option<&'a PyTypeInfo> {
+        if self.stack.len() == 2 {
+            // Specifically for [Arr, ScalarFrame] stack
+            if let Some(Frame::Arr { .. }) = self.stack.first() {
+                if let Some(rt_type) = root_target_type {
+                    if rt_type.kind == PyTypeKind::List && !rt_type.args.is_empty() {
+                        return Some(&rt_type.args[0]);
+                    }
+                }
+            }
+        }
+        None
+    }
 
     fn push_path_for_scalar(&mut self) {
         if let Some(top) = self.stack.last() {
@@ -212,7 +220,12 @@ impl Builder {
     }
 
     /// Feed a single scanner event, returning an optional snapshot.
-    pub fn feed_event(&mut self, ev: Event) -> Result<Option<Snapshot>, JsonError> {
+    pub fn feed_event(
+        &mut self,
+        ev: Event,
+        root_target_type: Option<&PyTypeInfo>,
+    ) -> Result<Option<Snapshot>, JsonError> {
+        // Added root_target_type
         match ev {
             /*──────── structural open ───────*/
             Event::StartObj => {
@@ -228,7 +241,7 @@ impl Builder {
             /*──────── structural close ──────*/
             Event::EndObj | Event::EndArr => {
                 let finished_val = self.finish_container()?;
-                return self.finish_value_and_maybe_snapshot(finished_val);
+                return self.finish_value_and_maybe_snapshot(finished_val); // finish_value_and_maybe_snapshot doesn't need type for now
             }
 
             /*──────── string chunks ─────────*/
@@ -238,8 +251,13 @@ impl Builder {
                 let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
 
                 if should_snapshot_scalar {
-                    if let Some(expected_item_type) = self.get_expected_type_for_feed_event_scalar_snapshot() {
-                        if matches!(expected_item_type.kind, PyTypeKind::Class | PyTypeKind::Union) {
+                    if let Some(expected_item_type) =
+                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
+                    {
+                        if matches!(
+                            expected_item_type.kind,
+                            PyTypeKind::Class | PyTypeKind::Union
+                        ) {
                             debug!("[Builder::feed_event] Suppressing scalar snapshot for StrChunk, expected class/union list item: {:?}", expected_item_type.name);
                             should_snapshot_scalar = false;
                         }
@@ -251,8 +269,12 @@ impl Builder {
                 if let Some(Frame::Str { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
 
-                    if should_snapshot_scalar { // This will be false if suppressed
-                        debug!("[Builder::feed_event] Emitting partial snapshot for StrChunk: {}", buf);
+                    if should_snapshot_scalar {
+                        // This will be false if suppressed
+                        debug!(
+                            "[Builder::feed_event] Emitting partial snapshot for StrChunk: {}",
+                            buf
+                        );
                         return Ok(Some(Snapshot::Partial {
                             path: self.path.clone(),
                             value: JsonValue::String(buf.clone()),
@@ -304,8 +326,13 @@ impl Builder {
                 let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
 
                 if should_snapshot_scalar {
-                     if let Some(expected_item_type) = self.get_expected_type_for_feed_event_scalar_snapshot() {
-                        if matches!(expected_item_type.kind, PyTypeKind::Class | PyTypeKind::Union) {
+                    if let Some(expected_item_type) =
+                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
+                    {
+                        if matches!(
+                            expected_item_type.kind,
+                            PyTypeKind::Class | PyTypeKind::Union
+                        ) {
                             debug!("[Builder::feed_event] Suppressing scalar snapshot for NumberChunk, expected class/union list item: {:?}", expected_item_type.name);
                             should_snapshot_scalar = false;
                         }
@@ -317,9 +344,13 @@ impl Builder {
                 if let Some(Frame::Num { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
 
-                    if should_snapshot_scalar { // This will be false if suppressed
+                    if should_snapshot_scalar {
+                        // This will be false if suppressed
                         let val = JsonValue::Number(parse_number(buf)?);
-                        debug!("[Builder::feed_event] Emitting partial snapshot for NumberChunk: {}", buf);
+                        debug!(
+                            "[Builder::feed_event] Emitting partial snapshot for NumberChunk: {}",
+                            buf
+                        );
                         return Ok(Some(Snapshot::Partial {
                             path: self.path.clone(),
                             value: val,
@@ -347,23 +378,32 @@ impl Builder {
                 let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
 
                 if should_snapshot_scalar {
-                    if let Some(expected_item_type) = self.get_expected_type_for_feed_event_scalar_snapshot() {
-                        if matches!(expected_item_type.kind, PyTypeKind::Class | PyTypeKind::Union) {
+                    if let Some(expected_item_type) =
+                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
+                    {
+                        if matches!(
+                            expected_item_type.kind,
+                            PyTypeKind::Class | PyTypeKind::Union
+                        ) {
                             debug!("[Builder::feed_event] Suppressing scalar snapshot for IdentChunk, expected class/union list item: {:?}", expected_item_type.name);
                             should_snapshot_scalar = false;
                         }
                     }
                 }
-                
+
                 self.ensure_ident_frame();
 
                 if let Some(Frame::Ident { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
 
-                    if should_snapshot_scalar { // This will be false if suppressed
+                    if should_snapshot_scalar {
+                        // This will be false if suppressed
                         let val =
                             parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf)));
-                        debug!("[Builder::feed_event] Emitting partial snapshot for IdentChunk: {}", buf);
+                        debug!(
+                            "[Builder::feed_event] Emitting partial snapshot for IdentChunk: {}",
+                            buf
+                        );
                         return Ok(Some(Snapshot::Partial {
                             path: self.path.clone(),
                             value: val,
@@ -567,7 +607,12 @@ impl Builder {
         Ok(None)
     }
 
-    pub fn finish(&mut self, streaming: bool) -> Result<JsonValue, JsonError> {
+    pub fn finish(
+        &mut self,
+        streaming: bool,
+        root_target_type: Option<&PyTypeInfo>,
+    ) -> Result<JsonValue, JsonError> {
+        // Added root_target_type
         /*──────────── when we’re *inside* something at EOF / NeedMore ───────────*/
         if self.stack.is_empty() {
             return Ok(JsonValue::Null); // or JsonValue::Array(vec![]) if you prefer
@@ -631,14 +676,23 @@ impl Builder {
                 /*───────────────── 3. flush the dangling scalar itself (with modification) ─────────────*/
                 // If stack is [Arr, ScalarFrame] and Arr expects objects, try to wrap scalar.
                 if self.stack.len() == 2 {
-                    if let (Some(Frame::Arr { .. }), Some(scalar_frame_to_finish)) = (self.stack.first(), self.stack.last()) {
-                        if let Some(expected_item_type) = self.get_expected_type_for_array_item_in_finish() {
-                            if matches!(expected_item_type.kind, PyTypeKind::Class | PyTypeKind::Union) {
+                    if let (Some(Frame::Arr { .. }), Some(scalar_frame_to_finish)) =
+                        (self.stack.first(), self.stack.last())
+                    {
+                        if let Some(expected_item_type) =
+                            self.get_expected_type_for_array_item_in_finish(root_target_type)
+                        {
+                            // Pass root_target_type
+                            if matches!(
+                                expected_item_type.kind,
+                                PyTypeKind::Class | PyTypeKind::Union
+                            ) {
                                 debug!("[Builder::finish] Dangling scalar for expected class/union list item: {:?}. Attempting to wrap.", expected_item_type.name);
                                 let scalar_value = match scalar_frame_to_finish {
-                                    Frame::Str { buf } => JsonValue::String(unescape(buf)?),
+                                    Frame::Str { buf } => JsonValue::String(unescape(buf)?), // unescape here before putting in map
                                     Frame::Num { buf } => JsonValue::Number(parse_number(buf)?),
-                                    Frame::Ident { buf } => parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf))),
+                                    Frame::Ident { buf } => parse_ident(buf)
+                                        .unwrap_or_else(|| JsonValue::String(squash_ws(buf))), // Use squash_ws
                                     _ => {
                                         // This case should ideally not be reached if scalar_frame_to_finish is truly a scalar frame
                                         debug!("[Builder::finish] Dangling frame is not Str, Num, or Ident. Returning Null.");
@@ -649,27 +703,46 @@ impl Builder {
                                 // Heuristic: Use "content" as key if class is Chat, or first field name.
                                 // This is a simplified approach. A more robust solution would involve deeper schema introspection
                                 // or conventions for how to handle raw scalars meant for object fields.
-                                let field_name = if expected_item_type.name == "Chat" { // Assuming simple name check for Chat
+                                let field_name = if expected_item_type.name == "Chat" {
+                                    // Assuming simple name check for Chat
                                     "content".to_string()
                                 } else {
-                                    expected_item_type.fields.keys().next().cloned().unwrap_or_else(|| "unknown_field".to_string())
+                                    expected_item_type
+                                        .fields
+                                        .keys()
+                                        .next()
+                                        .cloned()
+                                        .unwrap_or_else(|| "unknown_field".to_string())
                                 };
-                                
+
                                 let mut obj_map = HashMap::new();
                                 obj_map.insert(field_name, scalar_value);
 
                                 // Add _type_name if we can determine it (simplified)
-                                let type_to_instantiate_name = if expected_item_type.kind == PyTypeKind::Union {
-                                    // For a Union, pick the first compatible class arg, or just the first arg's name.
-                                    // This is highly simplified. A real system might need a discriminator or try types.
-                                    expected_item_type.args.first().map_or(expected_item_type.name.clone(), |arg| arg.name.clone())
-                                } else { // PyTypeKind::Class
-                                    expected_item_type.name.clone()
-                                };
-                                obj_map.insert("_type_name".to_string(), JsonValue::String(type_to_instantiate_name));
+                                let type_to_instantiate_name =
+                                    if expected_item_type.kind == PyTypeKind::Union {
+                                        // For a Union, pick the first compatible class arg, or just the first arg's name.
+                                        // This is highly simplified. A real system might need a discriminator or try types.
+                                        expected_item_type
+                                            .args
+                                            .first()
+                                            .map_or(expected_item_type.name.clone(), |arg| {
+                                                arg.name.clone()
+                                            })
+                                    } else {
+                                        // PyTypeKind::Class
+                                        expected_item_type.name.clone()
+                                    };
+                                obj_map.insert(
+                                    "_type_name".to_string(),
+                                    JsonValue::String(type_to_instantiate_name),
+                                );
 
                                 let list_item_obj = JsonValue::Object(obj_map);
-                                debug!("[Builder::finish] Wrapped dangling scalar into: {:?}", list_item_obj);
+                                debug!(
+                                    "[Builder::finish] Wrapped dangling scalar into: {:?}",
+                                    list_item_obj
+                                );
                                 // Return as an array containing this single object
                                 return Ok(JsonValue::Array(vec![list_item_obj]));
                             }
@@ -683,14 +756,37 @@ impl Builder {
                     Frame::Str { buf } => {
                         if streaming {
                             // Check for common incomplete escape sequences at the end of the buffer
-                            let ends_with_single_backslash = buf.ends_with('\\') && !buf.ends_with("\\\\");
-                            let ends_with_partial_unicode = if buf.len() >= 2 && buf.ends_with('u') {
+                            let ends_with_single_backslash =
+                                buf.ends_with('\\') && !buf.ends_with("\\\\");
+                            let ends_with_partial_unicode = if buf.len() >= 2 && buf.ends_with('u')
+                            {
                                 buf.chars().nth(buf.len() - 2) == Some('\\') // ends with \u
-                            } else if buf.len() >= 3 && buf.ends_with(|c: char| c.is_ascii_hexdigit()) && buf.chars().nth(buf.len()-2) == Some('u') {
+                            } else if buf.len() >= 3
+                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
+                                && buf.chars().nth(buf.len() - 2) == Some('u')
+                            {
                                 buf.chars().nth(buf.len() - 3) == Some('\\') // ends with \uX
-                            } else if buf.len() >= 4 && buf.ends_with(|c: char| c.is_ascii_hexdigit()) && buf.chars().nth(buf.len()-3) == Some('u') && buf.chars().nth(buf.len()-2).map_or(false, |c| c.is_ascii_hexdigit()) {
+                            } else if buf.len() >= 4
+                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
+                                && buf.chars().nth(buf.len() - 3) == Some('u')
+                                && buf
+                                    .chars()
+                                    .nth(buf.len() - 2)
+                                    .map_or(false, |c| c.is_ascii_hexdigit())
+                            {
                                 buf.chars().nth(buf.len() - 4) == Some('\\') // ends with \uXX
-                            } else if buf.len() >= 5 && buf.ends_with(|c: char| c.is_ascii_hexdigit()) && buf.chars().nth(buf.len()-4) == Some('u') && buf.chars().nth(buf.len()-3).map_or(false, |c| c.is_ascii_hexdigit()) && buf.chars().nth(buf.len()-2).map_or(false, |c| c.is_ascii_hexdigit()) {
+                            } else if buf.len() >= 5
+                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
+                                && buf.chars().nth(buf.len() - 4) == Some('u')
+                                && buf
+                                    .chars()
+                                    .nth(buf.len() - 3)
+                                    .map_or(false, |c| c.is_ascii_hexdigit())
+                                && buf
+                                    .chars()
+                                    .nth(buf.len() - 2)
+                                    .map_or(false, |c| c.is_ascii_hexdigit())
+                            {
                                 buf.chars().nth(buf.len() - 5) == Some('\\') // ends with \uXXX
                             } else {
                                 false
@@ -702,12 +798,15 @@ impl Builder {
                             } else {
                                 Ok(JsonValue::String(unescape(buf)?))
                             }
-                        } else { // Not streaming
+                        } else {
+                            // Not streaming
                             Ok(JsonValue::String(unescape(buf)?))
                         }
                     }
                     Frame::Num { buf } => Ok(JsonValue::Number(parse_number(buf)?)),
-                    Frame::Ident { buf } => Ok(parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf)))),
+                    Frame::Ident { buf } => {
+                        Ok(parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf))))
+                    }
                     _ => Ok(JsonValue::Null),
                 };
             }
@@ -737,6 +836,7 @@ impl Builder {
 
 #[derive(Debug)]
 pub struct Parser {
+    // This is json_parser::Parser (internal)
     scanner: Scanner,
     builder: Builder,
     buf: String,
@@ -745,21 +845,27 @@ pub struct Parser {
 
 impl Default for Parser {
     fn default() -> Self {
-        Self::new(false, None) // Pass None for target_type_info for default
+        Self::new(false)
     }
 }
 
 impl Parser {
-    pub fn new(streaming: bool, target_type_info: Option<PyTypeInfo>) -> Self { // Updated constructor
+    pub fn new(streaming: bool) -> Self {
+        // target_type_info removed from constructor
         Self {
             scanner: Scanner::new(),
-            builder: Builder::new(target_type_info), // Pass target_type_info to Builder
+            builder: Builder::new(), // Builder::new() no longer takes target_type_info
             buf: String::new(),
             streaming: streaming,
         }
     }
 
-    pub fn parse(&mut self, bytes: Vec<u8>) -> Result<JsonValue, JsonError> {
+    // root_target_type is passed from StreamParser::step
+    pub fn parse(
+        &mut self,
+        bytes: Vec<u8>,
+        root_target_type: Option<&PyTypeInfo>,
+    ) -> Result<JsonValue, JsonError> {
         let part = String::from_utf8(bytes).unwrap();
         self.buf = self.buf.clone() + &part;
 
@@ -768,13 +874,16 @@ impl Parser {
         loop {
             match self.scanner.next_step() {
                 ScanStep::Event(ev) => {
-                    if let Some(Snapshot::Complete(v)) = self.builder.feed_event(ev)? {
+                    // Pass root_target_type to builder.feed_event
+                    if let Some(Snapshot::Complete(v)) =
+                        self.builder.feed_event(ev, root_target_type)?
+                    {
                         return Ok(v);
                     }
                 }
                 ScanStep::NeedMore => {
-                    // End of buffer – finish.
-                    return self.builder.finish(self.streaming);
+                    // End of buffer – finish. Pass root_target_type to builder.finish
+                    return self.builder.finish(self.streaming, root_target_type);
                 }
                 ScanStep::Error(e) => return Err(e),
             }
@@ -784,39 +893,58 @@ impl Parser {
 
 // ───────────────────────── Stream wrapper for Python ──────────────────────────
 
-// in StreamParser
+// in StreamParser (json_parser::StreamParser, internal Rust struct)
 #[derive(Debug)]
 pub struct StreamParser {
     tagger: TagFinder,
     capturing: bool,
-    inner: Parser,
+    inner: Parser, // This is json_parser::Parser
     done: bool,
     wanted: HashSet<String>,
     ignored: HashSet<String>,
-    target_type_info: Option<PyTypeInfo>, // Added field to store target_type_info
+    // target_type_info: Option<PyTypeInfo>, // REMOVED - will be passed to step()
 }
 
 impl default::Default for StreamParser {
     fn default() -> Self {
-        Self::new(vec![], vec![], None) // Pass None for target_type_info
+        Self::new(vec![], vec![])
     }
 }
 
 impl StreamParser {
-    pub fn new(tags: Vec<String>, ignored: Vec<String>, target_type_info: Option<PyTypeInfo>) -> Self { // Updated constructor
-        debug!("[StreamParser::new] Received tags: {:?}, ignored: {:?}", tags, ignored);
-        let wanted_set: HashSet<String> = tags.iter().cloned().collect();
-        let ignored_set: HashSet<String> = ignored.iter().cloned().collect();
-        debug!("[StreamParser::new] Initialized self.wanted: {:?}, self.ignored: {:?}", wanted_set, ignored_set);
-        debug!("[StreamParser::new] Initializing TagFinder with wanted_tags: {:?}, ignored_tags: {:?}", tags, ignored);
+    // target_type_info removed from constructor
+    pub fn new(tags: Vec<String>, ignored: Vec<String>) -> Self {
+        debug!(
+            "[json_parser::StreamParser::new] Received tags: {:?} (original), ignored: {:?} (original)",
+            tags, ignored
+        );
+
+        // For StreamParser's internal logic (self.wanted, self.ignored), use lowercase sets
+        let wanted_set_lowercase: HashSet<String> = tags.iter().map(|s| s.to_lowercase()).collect();
+        let ignored_set_lowercase: HashSet<String> =
+            ignored.iter().map(|s| s.to_lowercase()).collect();
+
+        debug!(
+            "[json_parser::StreamParser::new] Initializing TagFinder with original case tags. Wanted: {:?}, Ignored: {:?}",
+            tags, ignored
+        );
+        debug!(
+            "[json_parser::StreamParser::new] Storing internal wanted_set (lowercase): {:?}",
+            wanted_set_lowercase
+        );
+        debug!(
+            "[json_parser::StreamParser::new] Storing internal ignored_set (lowercase): {:?}",
+            ignored_set_lowercase
+        );
+
         Self {
-            tagger: TagFinder::new_with_filter(tags.clone(), ignored.clone()), 
-            wanted: wanted_set,
-            ignored: ignored_set,
-            inner: Parser::new(true, target_type_info.clone()), // Pass target_type_info to inner Parser
+            tagger: TagFinder::new_with_filter(tags, ignored), // Pass original case tags to TagFinder
+            wanted: wanted_set_lowercase, // StreamParser uses this for its logic with name.to_lowercase()
+            ignored: ignored_set_lowercase, // StreamParser uses this for its logic with name.to_lowercase()
+            inner: Parser::new(true),
             done: false,
             capturing: false,
-            target_type_info, // Store it
+            // target_type_info: None, // REMOVED
         }
     }
 
@@ -824,76 +952,65 @@ impl StreamParser {
         self.done
     }
 
-    pub fn step(&mut self, chunk: &str) -> Result<Option<JsonValue>, JsonError> {
+    // root_target_type is passed from TypedStreamParser (in src/parser.rs)
+    pub fn step(
+        &mut self,
+        chunk: &str,
+        root_target_type: Option<&PyTypeInfo>,
+    ) -> Result<Option<JsonValue>, JsonError> {
         if self.done {
-            debug!("[StreamParser::step] Already done. Chunk: '{}'", chunk);
+            debug!(
+                "[json_parser::StreamParser::step] Already done. Chunk: '{}'",
+                chunk
+            );
             return Ok(None);
         }
-        debug!("[StreamParser::step] Processing chunk: '{}'", chunk);
-        debug!("[StreamParser::step] Current state: capturing={}, done={}, wanted={:?}", self.capturing, self.done, self.wanted);
+        // ... (rest of the debug logs can be updated to reflect json_parser::StreamParser)
 
         let mut latest = None;
         self.tagger.push(chunk, |ev| {
-            debug!("[StreamParser::step] TagEvent: {:?}", ev);
             match ev {
                 TagEvent::Open(name) => {
                     let name_lower = name.to_lowercase();
-                    debug!("[StreamParser::step] TagEvent::Open('{}'), lowercased='{}'. self.wanted: {:?}", name, name_lower, self.wanted);
-                    let is_wanted_tag = self.wanted.is_empty() || self.wanted.contains(&name_lower);
-                    debug!("[StreamParser::step] Tag '{}' (lower: '{}') is_wanted_tag: {}", name, name_lower, is_wanted_tag);
-                    self.capturing = is_wanted_tag;
-                    debug!("[StreamParser::step] Set self.capturing = {}", self.capturing);
-
+                    self.capturing = self.wanted.is_empty() || self.wanted.contains(&name_lower);
                     if self.capturing {
-                        debug!("[StreamParser::step] Resetting inner parser because capturing started for tag: {}", name_lower); // Log with name_lower for consistency
-                        // Use stored target_type_info when re-initializing inner parser
-                        self.inner = Parser::new(true, self.target_type_info.clone());
+                        self.inner = Parser::new(true); // Reset inner parser
                     }
                     Ok(())
                 }
                 TagEvent::Bytes(bytes) => {
-                    debug!("[StreamParser::step] TagEvent::Bytes (first 50 chars): '{}'. self.capturing: {}", String::from_utf8_lossy(bytes.as_bytes()).chars().take(50).collect::<String>(), self.capturing);
                     if self.capturing {
-                        let parse_res = self.inner.parse(bytes.as_bytes().to_vec());
-                        debug!("[StreamParser::step] Inner parser result: {:?}", parse_res.as_ref().map(|_| "Ok(...)").unwrap_or_else(|e| "Err(...)"));
-
+                        // Pass root_target_type to inner.parse()
+                        let parse_res = self
+                            .inner
+                            .parse(bytes.as_bytes().to_vec(), root_target_type);
                         match parse_res {
                             Ok(JsonValue::Array(arr)) => {
-                                if arr.len() == 1 {
-                                    latest = Some(arr.into_iter().next().unwrap());
+                                latest = if arr.len() == 1 {
+                                    arr.into_iter().next()
                                 } else {
-                                    latest = Some(JsonValue::Array(arr));
-                                }
+                                    Some(JsonValue::Array(arr))
+                                };
                             }
                             Ok(v) => latest = Some(v),
-                            Err(e) => {
-                                debug!("[StreamParser::step] Inner parser error: {:?}", e);
-                                return Err(e);
-                            }
+                            Err(e) => return Err(e),
                         }
-                         debug!("[StreamParser::step] latest after Bytes: {:?}", latest.is_some());
                     }
                     Ok(())
                 }
                 TagEvent::Close(name) => {
                     let name_lower = name.to_lowercase();
-                    debug!("[StreamParser::step] TagEvent::Close('{}'), lowercased='{}'. self.capturing: {}, self.wanted: {:?}", name, name_lower, self.capturing, self.wanted);
                     let is_wanted_tag = self.wanted.is_empty() || self.wanted.contains(&name_lower);
-                    debug!("[StreamParser::step] Tag '{}' (lower: '{}') is_wanted_tag for close: {}", name, name_lower, is_wanted_tag);
-                    
                     if self.capturing && is_wanted_tag {
-                        latest = Some(self.inner.builder.finish(true)?);
+                        // Pass root_target_type to builder.finish
+                        latest = Some(self.inner.builder.finish(true, root_target_type)?);
                         self.done = true;
                         self.capturing = false;
-                        debug!("[StreamParser::step] Closing wanted tag '{}' (lower: '{}'). Set self.done = true, self.capturing = false. latest: {:?}", name, name_lower, latest.is_some());
-                    } else {
-                        debug!("[StreamParser::step] Closing tag '{}' (lower: '{}') not processed (capturing: {}, is_wanted_tag: {}).", name, name_lower, self.capturing, is_wanted_tag);
                     }
                     Ok(())
                 }
             }
         })?;
-        debug!("[StreamParser::step] Finished processing chunk. Returning latest: {:?}", latest.is_some());
         Ok(latest)
     }
 }
@@ -958,13 +1075,13 @@ mod tests {
             let bytes   = wrapped.as_bytes();
 
             /* ── 3. feed the wrapped text in `chunk_sz`-sized pieces ────── */
-            let mut sp = StreamParser::default();
+            let mut sp = StreamParser::default(); // StreamParser::new takes 2 args, default calls new(vec![], vec![])
             let mut i  = 0;
             let mut end_val = None;
             while i < bytes.len() {
                 let end   = usize::min(i + chunk_sz, bytes.len());
                 let chunk = std::str::from_utf8(&bytes[i..end]).unwrap();
-                end_val = sp.step(chunk).unwrap();
+                end_val = sp.step(chunk, None).unwrap(); // step takes 2 args (chunk, root_target_type)
                 i = end;
             }
 
@@ -989,10 +1106,10 @@ mod tests {
         // rest of the object plus closing tag and extra chatter
         let chunk2 = r#", "age": 30}</User> blah blah"#;
 
-        let mut sp = StreamParser::default();
+        let mut sp = StreamParser::default(); // StreamParser::new takes 2 args, default calls new(vec![], vec![])
 
         // ── first chunk ───────────────────────────
-        let part1 = sp.step(chunk1).expect("stream step 1 failed");
+        let part1 = sp.step(chunk1, None).expect("stream step 1 failed"); // step takes 2 args
         assert!(!sp.is_done(), "should not be done after first chunk");
 
         // We expect a partial with only the first key.
@@ -1008,7 +1125,7 @@ mod tests {
         }
 
         // ── second chunk ──────────────────────────
-        let part2 = sp.step(chunk2).expect("stream step 2 failed");
+        let part2 = sp.step(chunk2, None).expect("stream step 2 failed"); // step takes 2 args
         assert!(sp.is_done(), "parser should be done after close tag");
 
         // Final value must contain both fields.
@@ -1023,7 +1140,7 @@ mod tests {
         }
 
         // Further calls after done yield None.
-        assert!(sp.step("").unwrap().is_none());
+        assert!(sp.step("", None).unwrap().is_none()); // step takes 2 args
     }
 
     #[test]
@@ -1038,11 +1155,11 @@ mod tests {
             r#"0}</User> garbage"#, // rest of value + close tag + trailing text
         ];
 
-        let mut sp = StreamParser::default();
+        let mut sp = StreamParser::default(); // StreamParser::new takes 2 args, default calls new(vec![], vec![])
         let mut snapshot = None;
 
         for (i, slice) in chunks.iter().enumerate() {
-            snapshot = sp.step(slice).expect("stream step failed");
+            snapshot = sp.step(slice, None).expect("stream step failed"); // step takes 2 args
 
             // we should only be 'done' after the last chunk
             assert_eq!(sp.is_done(), i == chunks.len() - 1);
@@ -1084,7 +1201,7 @@ mod tests {
         }
 
         // further calls after done should yield None
-        assert!(sp.step("").unwrap().is_none());
+        assert!(sp.step("", None).unwrap().is_none()); // step takes 2 args
     }
 
     #[test]
@@ -1094,11 +1211,11 @@ mod tests {
 
         /* helper: run one set of slices through StreamParser and return the final value */
         fn run(chunks: &[&str]) -> JsonValue {
-            let mut sp = StreamParser::default();
+            let mut sp = StreamParser::default(); // StreamParser::new takes 2 args, default calls new(vec![], vec![])
             let mut last = None;
 
             for (i, part) in chunks.iter().enumerate() {
-                last = sp.step(part).expect("stream step failed");
+                last = sp.step(part, None).expect("stream step failed"); // step takes 2 args
                 assert_eq!(sp.is_done(), i == chunks.len() - 1);
             }
             last.expect("no final value produced")
@@ -1244,7 +1361,8 @@ mod tests {
         // Test comma-separated
         let input = r#"{"message": 123},{"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
                 match &arr[0] {
@@ -1268,7 +1386,8 @@ mod tests {
         // Test space-separated
         let input = r#"{"message": 123} {"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
                 match &arr[0] {
@@ -1295,7 +1414,8 @@ mod tests {
             .as_bytes()
             .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
                 match &arr[0] {
@@ -1319,7 +1439,8 @@ mod tests {
         // Test no separation
         let input = r#"{"message": 123}{"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
                 match &arr[0] {
@@ -1345,7 +1466,8 @@ mod tests {
     fn test_simple_string() {
         let input = r#""hello world""#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::String(s)) => assert_eq!(s, "hello world"),
             _ => panic!("Expected string value"),
         }
@@ -1355,7 +1477,8 @@ mod tests {
     fn test_string_escapes() {
         let input = r#""hello\nworld\t\"quote\"""#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::String(s)) => assert_eq!(s, "hello\nworld\t\"quote\""),
             _ => panic!("Expected string value"),
         }
@@ -1365,7 +1488,8 @@ mod tests {
     fn test_simple_number() {
         let input = "42".as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Number(Number::Integer(n))) => assert_eq!(n, 42),
             _ => panic!("Expected integer value"),
         }
@@ -1375,7 +1499,8 @@ mod tests {
     fn test_float_number() {
         let input = "42.5".as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Number(Number::Float(n))) => assert_eq!(n, 42.5),
             _ => panic!("Expected float value"),
         }
@@ -1385,7 +1510,8 @@ mod tests {
     fn test_simple_object() {
         let input = r#"{"key": "value"}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 1);
                 match map.get("key") {
@@ -1401,7 +1527,8 @@ mod tests {
     fn test_simple_array() {
         let input = r#"[1, 2, 3]"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 3);
                 match &arr[0] {
@@ -1427,7 +1554,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
                 match map.get("name") {
@@ -1469,7 +1597,8 @@ mod tests {
 
         for (input, expected_err) in cases {
             let mut parser = Parser::default();
-            match parser.parse(input.as_bytes().to_vec()) {
+            match parser.parse(input.as_bytes().to_vec(), None) {
+                // Added None
                 Err(e) => assert_eq!(e, expected_err),
                 Ok(_) => panic!("Expected error for input: {}", input),
             }
@@ -1486,7 +1615,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
                 assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
@@ -1508,7 +1638,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 2);
                 assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
@@ -1534,7 +1665,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 2);
                 match map.get("array").unwrap() {
@@ -1560,7 +1692,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
                 assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
@@ -1578,7 +1711,8 @@ mod tests {
             .as_bytes()
             .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
                 match &arr[0] {
@@ -1613,7 +1747,8 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input) {
+        match parser.parse(input, None) {
+            // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 4);
                 assert_eq!(map.get("name").unwrap().as_string().unwrap(), "John");
@@ -1645,7 +1780,7 @@ mod tests {
 
     #[test]
     fn test_bad_array_recovery() {
-        let mut parser = StreamParser::default();
+        let mut parser = StreamParser::default(); // This StreamParser is json_parser::StreamParser
         let result = r#"
         <action>
             {"message": 123},
@@ -1661,7 +1796,7 @@ mod tests {
             let end = usize::min(i + 1, bytes.len());
             let chunk = std::str::from_utf8(&bytes[i..end]).unwrap();
 
-            end_val = parser.step(chunk).unwrap();
+            end_val = parser.step(chunk, None).unwrap(); // Added None for root_target_type
             i = end;
         }
         assert!(parser.is_done(), "stream parser did not finish");
@@ -1676,7 +1811,7 @@ mod tests {
         // Where tags and JSON elements are split in unusual places
 
         // Create a parser that's looking for ReportSubsystems tags
-        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![], None); // Added None for target_type_info
+        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![]); // Correct: new takes 2 args
 
         // Add debug logging to track the parsing process
         println!("\nTesting LLM token fragmentation:");
@@ -1720,7 +1855,8 @@ mod tests {
         // Process each fragment
         for (i, fragment) in fragments.iter().enumerate() {
             println!("Fragment {}: '{}'", i, fragment);
-            if let Some(result) = parser.step(fragment).unwrap() {
+            if let Some(result) = parser.step(fragment, None).unwrap() {
+                // Added None for root_target_type
                 println!("  Got result: {:?}", result);
                 results.push(result);
             } else {
@@ -1774,7 +1910,7 @@ mod tests {
         // the opening tag is broken into individual parts with spaces
 
         // Create a parser that's looking for ReportSubsystems tags
-        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![], None); // Added None for target_type_info
+        let mut parser = StreamParser::new(vec!["ReportSubsystems".to_string()], vec![]); // Correct: new takes 2 args
 
         println!("\nTesting extreme tag fragmentation - single character tokens:");
 
@@ -1791,7 +1927,7 @@ mod tests {
         // Process each fragment
         for (i, fragment) in fragments.iter().enumerate() {
             println!("LLM output: {}", fragment);
-            let result = parser.step(fragment).unwrap();
+            let result = parser.step(fragment, None).unwrap(); // Added None for root_target_type
             if result.is_some() {
                 println!("Parser result: {:?}", result.unwrap());
             } else {

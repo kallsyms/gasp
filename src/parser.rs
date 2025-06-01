@@ -36,7 +36,7 @@ fn count_brackets(s: &str) -> i32 {
 impl TypedStreamParser {
     pub fn new() -> Self {
         Self {
-            stream_parser: StreamParser::new(Vec::new(), Vec::new(), None), // Added None for target_type_info
+            stream_parser: StreamParser::new(Vec::new(), Vec::new()), // Now takes 2 args
             type_info: None,
             partial_data: None,
             partial_instance: None,
@@ -47,14 +47,9 @@ impl TypedStreamParser {
     }
 
     pub fn with_type(type_info: PyTypeInfo) -> Self {
-        let type_info_clone_for_stream_parser = Some(type_info.clone());
+        // let type_info_clone_for_stream_parser = Some(type_info.clone()); // No longer needed for constructor
         Self {
-            // Pass cloned type_info to the StreamParser constructor
-            stream_parser: StreamParser::new(
-                Vec::new(),
-                Vec::new(),
-                type_info_clone_for_stream_parser,
-            ),
+            stream_parser: StreamParser::new(Vec::new(), Vec::new()), // Now takes 2 args
             type_info: Some(type_info), // Store the original type_info
             partial_data: None,
             partial_instance: None,
@@ -66,8 +61,8 @@ impl TypedStreamParser {
 
     /// Process a chunk of JSON data
     pub fn step(&mut self, chunk: &str) -> PyResult<Option<JsonValue>> {
-        // Use the stream parser to process the chunk directly (with its tags)
-        let result = match self.stream_parser.step(chunk) {
+        // Use the stream parser to process the chunk, passing stored type_info
+        let result = match self.stream_parser.step(chunk, self.type_info.as_ref()) {
             Ok(val) => val,
             Err(e) => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -275,23 +270,23 @@ impl PyParser {
                 // A cleaner way might be for TypedStreamParser::with_type to also take initial tags.
                 // Or, add a method to TypedStreamParser to update tags, which re-initializes its StreamParser.
 
-                // Simplest fix for now: Re-create StreamParser with new tags AND existing type_info
-                parser.stream_parser =
-                    StreamParser::new(tags, ignored_tags.clone(), parser.type_info.clone());
+                // TypedStreamParser.with_type correctly initializes its internal StreamParser.
+                // We now need to ensure the TagFinder within that StreamParser gets the correct tags.
+                // This requires a method to update tags on StreamParser/TagFinder, or for new() to take them.
+                // For now, we re-initialize StreamParser, ensuring it gets the correct number of args.
+                // The type_info is managed by TypedStreamParser and passed via its step method.
+                parser.stream_parser = StreamParser::new(tags, ignored_tags.clone());
 
                 Ok(Self { parser })
             }
             None => {
                 debug!("[PyParser::new] No type_obj provided.");
-                // Create parser without type info but with ignored tags
-                let mut parser = TypedStreamParser::new(); // This initializes TypedStreamParser.stream_parser with None for type_info
+                let mut parser = TypedStreamParser::new();
                 debug!(
                     "[PyParser::new] (No type_obj) ignored_tags for StreamParser: {:?}",
                     ignored_tags
                 );
-                // Re-create StreamParser with new (empty) tags AND existing (None) type_info
-                parser.stream_parser =
-                    StreamParser::new(Vec::new(), ignored_tags.clone(), parser.type_info.clone());
+                parser.stream_parser = StreamParser::new(Vec::new(), ignored_tags.clone());
 
                 Ok(Self { parser })
             }
@@ -367,12 +362,10 @@ impl PyParser {
             default_ignored_tags
         );
 
-        // Similar to PyParser::new, ensure type_info is passed when StreamParser is (re)created.
-        typed_stream_parser.stream_parser = StreamParser::new(
-            tags_for_stream_parser,
-            default_ignored_tags,
-            typed_stream_parser.type_info.clone(),
-        );
+        // Similar to PyParser::new logic.
+        // The type_info is managed by TypedStreamParser and passed via its step method.
+        typed_stream_parser.stream_parser =
+            StreamParser::new(tags_for_stream_parser, default_ignored_tags);
 
         Ok(Self {
             parser: typed_stream_parser,

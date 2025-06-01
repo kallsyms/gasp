@@ -47,10 +47,13 @@ impl TagFinder {
             "[TagFinder::new_with_filter] Received wanted: {:?}, ignored: {:?}",
             wanted, ignored
         );
-        let wanted_set: std::collections::HashSet<String> = wanted.into_iter().collect();
-        let ignored_set: std::collections::HashSet<String> = ignored.into_iter().collect();
+        // Store lowercase versions for case-insensitive matching
+        let wanted_set: std::collections::HashSet<String> =
+            wanted.into_iter().map(|s| s.to_lowercase()).collect();
+        let ignored_set: std::collections::HashSet<String> =
+            ignored.into_iter().map(|s| s.to_lowercase()).collect();
         debug!(
-            "[TagFinder::new_with_filter] Initialized self.wanted: {:?}, self.ignored: {:?}",
+            "[TagFinder::new_with_filter] Initialized self.wanted (lowercase): {:?}, self.ignored (lowercase): {:?}",
             wanted_set, ignored_set
         );
         Self {
@@ -125,34 +128,35 @@ impl TagFinder {
             let tag_body = &self.buf[lt + 1..gt]; // without '<' / '>'
             let is_close = tag_body.starts_with('/');
             let name_part = if is_close { &tag_body[1..] } else { tag_body };
-            let name = name_part.split_whitespace().next().unwrap_or("").to_owned();
+            let name = name_part.split_whitespace().next().unwrap_or("").to_owned(); // Original case name from text
+            let name_lower = name.to_lowercase(); // Lowercase for matching
             debug!(
-                "[TagFinder::push] Tag analysis: body='{}', is_close={}, name='{}'",
-                tag_body, is_close, name
+                "[TagFinder::push] Tag analysis: body='{}', is_close={}, name='{}', name_lower='{}'",
+                tag_body, is_close, name, name_lower
             );
 
-            // Check if this tag is ignored
-            let is_ignored = self.ignored.contains(&name);
+            // Check if this tag is ignored (use lowercase for comparison)
+            let is_ignored = self.ignored.contains(&name_lower);
             debug!(
-                "[TagFinder::push] Tag '{}' is_ignored: {} (self.ignored: {:?})",
-                name, is_ignored, self.ignored
+                "[TagFinder::push] Tag '{}' (lower: '{}') is_ignored: {} (self.ignored (lowercase): {:?})",
+                name, name_lower, is_ignored, self.ignored
             );
 
-            // Check if this tag is wanted (or if wanted list is empty, all non-ignored tags are wanted)
-            let name_lower_for_wanted_check = name.to_lowercase();
+            // Check if this tag is wanted (use lowercase for comparison)
             let is_wanted = if self.wanted.is_empty() {
-                !is_ignored
+                !is_ignored // If not specifically ignored, and wanted list is empty, it's wanted.
             } else {
-                self.wanted.contains(&name_lower_for_wanted_check)
+                self.wanted.contains(&name_lower)
             };
             debug!(
-                "[TagFinder::push] Tag '{}' is_wanted: {} (self.wanted: {:?})",
-                name, is_wanted, self.wanted
+                "[TagFinder::push] Tag '{}' (lower: '{}') is_wanted: {} (self.wanted (lowercase): {:?})",
+                name, name_lower, is_wanted, self.wanted
             );
 
             // If we're inside a wanted tag and not in an ignored section,
-            // emit the entire tag as content (for nested tags)
+            // emit the entire tag as content (for nested tags that are not themselves wanted/ignored)
             if self.inside && !self.inside_ignored && !is_wanted && !is_ignored {
+                // is_wanted and is_ignored are now based on name_lower
                 let tag_content = self.buf[lt..=gt].to_owned();
                 debug!(
                     "[TagFinder::push] Nested tag detected: '{}'. Emitting as Bytes.",
