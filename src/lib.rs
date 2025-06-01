@@ -110,6 +110,9 @@ impl PyStreamParser {
 /// Python module for parsing structured outputs into typed objects
 #[pymodule]
 fn gasp(py: Python, m: &PyModule) -> PyResult<()> {
+    // Initialize the logger. try_init() is used to avoid panic if already initialized.
+    let _ = env_logger::try_init();
+
     // Add base parser
     m.add_class::<PyStreamParser>()?;
 
