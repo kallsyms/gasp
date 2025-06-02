@@ -866,90 +866,6 @@ pub fn json_to_python(
 
             Ok(list.into())
         }
-        JsonValue::String(s) => {
-            // If type is enum, try to convert to enum
-            if let Some(PyTypeInfo {
-                kind: PyTypeKind::Class,
-                name,
-                module,
-                py_type,
-                ..
-            }) = type_info
-            {
-                // First try using the stored Python type reference
-                if let Some(py_type_ref) = py_type {
-                    let py_type_obj = py_type_ref.as_ref(py);
-                    // Try to get the enum value
-                    if let Ok(enum_value) = py_type_obj.getattr(s.as_str()) {
-                        return Ok(enum_value.into());
-                    }
-                }
-
-                // Fall back to module-based lookup
-                if let Some(module_name) = module {
-                    if module_name == "enum" {
-                        // Try to get the enum class
-                        if let Ok(py_module) = py.import(module_name.as_str()) {
-                            if let Ok(py_enum) = py_module.getattr(name.as_str()) {
-                                // Try to get the enum value
-                                if let Ok(enum_value) = py_enum.getattr(s.as_str()) {
-                                    return Ok(enum_value.into());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok(s.clone().into_py(py))
-        }
-        JsonValue::Number(n) => match n {
-            Number::Integer(i) => {
-                // Check if we have a type reference to use directly
-                if let Some(PyTypeInfo { py_type, kind, .. }) = type_info {
-                    if let Some(py_type_ref) = py_type {
-                        let py_type_obj = py_type_ref.as_ref(py);
-
-                        // Convert based on the actual Python type
-                        match kind {
-                            PyTypeKind::Float => Ok((*i as f64).into_py(py)),
-                            PyTypeKind::Integer => Ok(i.into_py(py)),
-                            // Try to construct the type with the value
-                            _ => {
-                                if let Ok(result) = py_type_obj.call1((*i,)) {
-                                    return Ok(result.into());
-                                }
-                                // Fall back to default conversion
-                                Ok(i.into_py(py))
-                            }
-                        }
-                    } else if kind == &PyTypeKind::Float {
-                        // Fall back to float conversion if we know it's a float
-                        Ok((*i as f64).into_py(py))
-                    } else {
-                        Ok(i.into_py(py))
-                    }
-                } else {
-                    Ok(i.into_py(py))
-                }
-            }
-            Number::Float(f) => {
-                // Check if we have a type reference to use directly
-                if let Some(PyTypeInfo { py_type, .. }) = type_info {
-                    if let Some(py_type_ref) = py_type {
-                        let py_type_obj = py_type_ref.as_ref(py);
-
-                        // Try to construct the type with the value
-                        if let Ok(result) = py_type_obj.call1((*f,)) {
-                            return Ok(result.into());
-                        }
-                    }
-                }
-                // Fall back to default conversion
-                Ok(f.into_py(py))
-            }
-        },
-        JsonValue::Boolean(b) => Ok(b.into_py(py)),
         JsonValue::Null => Ok(py.None()),
     }
 }
@@ -1115,7 +1031,7 @@ pub fn create_instance_from_json(
     println!("[RUST:create_instance_from_json] Standard instantiation failed for type {}. Attempting bare instance creation via __new__.", py_type_repr_new_attempt);
     if let Ok(new_method) = py_type.getattr("__new__") {
         if let Ok(bare_instance_any) = new_method.call1((py_type,)) {
-            let bare_instance = bare_instance_any.clone();
+            let bare_instance = bare_instance_any;
             let py_type_repr_new_success = py_type.repr()?.extract::<String>()?;
             println!("[RUST:create_instance_from_json] Successfully created bare instance via __new__ for type: {}", py_type_repr_new_success);
 
