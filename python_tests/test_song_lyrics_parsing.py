@@ -92,8 +92,10 @@ class IssueForm(Deserializable):
         if hasattr(self, 'ref_id') and self.ref_id is not None:
             parts.append(f"ref_id={self.ref_id}")
             
-        if hasattr(self, '_type_name') and getattr(self, '_type_name') is not None:
-             parts.append(f"_type_name='{self._type_name}'")
+        if hasattr(self, '_type_name'):
+            type_name_val = getattr(self, '_type_name', None)
+            if type_name_val is not None:
+                 parts.append(f"_type_name='{type_name_val}'")
 
         return f"IssueForm({', '.join(parts)})"
 
@@ -112,26 +114,23 @@ def run_test_scenario(json_input_string: str, chunk_size: int = 10):
         total_fed += len(chunk)
         
         # print(f"\nFeeding chunk ({len(chunk)} chars, total_fed {total_fed}): '{chunk[:100].replace(chr(10), ' ')}...'")
-        try:
-            partial_result = parser.feed(chunk)
-            if partial_result is None:
-                print("Current Object: None")
-            else:
-                print("Current Object:")
-                for item_idx, item in enumerate(partial_result):
-                    if hasattr(item, 'model_dump'):
-                        print(f"  Item {item_idx}: {item.model_dump()}")
-                    else:
-                        print(f"  Item {item_idx}: {item}") # Fallback to repr if no model_dump
-            
-            if parser.is_complete():
-                print("Parser marked complete.")
-            # time.sleep(1) # Keep 1-second sleep, user can comment out if too slow
-        except Exception as e:
-            print(f"Error during parser.feed: {e}")
-            # import traceback
-            # traceback.print_exc()
-            break
+        partial_result = parser.feed(chunk)
+        if partial_result is None:
+            print("Current Object: None")
+        else:
+            print("Current Object:")
+            for item_idx, item in enumerate(partial_result):
+                # ADD THIS LINE:
+                print(f"  Item {item_idx} type: {type(item)}") 
+                
+                if hasattr(item, 'model_dump'):
+                    print(f"  Item {item_idx}: {item.model_dump()}")
+                else:
+                    print(f"  Item {item_idx}: {item}") # Fallback to repr if no model_dump
+        
+        if parser.is_complete():
+            print("Parser marked complete.")
+        time.sleep(1) # Keep 1-second sleep, user can comment out if too slow
             
     print("\n--- Final validation (if parser not already complete) ---")
     if not parser.is_complete() and total_fed == len(json_input_string):
