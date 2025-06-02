@@ -21,8 +21,8 @@ def test_streaming_chat_instances():
     # Simulate streaming chunks that gradually build up a Chat object
     chunks = [
         '<Chat>{"_type_name": "Chat"',  # Initial chunk with type info
-        ', "content": "Hey"',           # Add content field
-        '!}</Chat>'                     # Complete the object
+        ', "content": "Hey',          # Add content field (exclamation inside quotes)
+        '!"}</Chat>'                      # Complete the object
     ]
     
     results = []
