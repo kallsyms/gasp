@@ -180,11 +180,112 @@ impl TypedStreamParser {
                             Some(json_to_python(py, data, self.type_info.as_ref())?)
                         }
                     }
-                    // This case handles if self.type_info was Some but not List (e.g. direct Class, Union)
-                    // OR if it was List but not List[Class] (e.g. List[str], List[Union])
-                    // OR if data was not JsonValue::Object when List[Class] was expected (handled above)
+                    // Handle direct Class types (not in a List)
+                    else if type_info_ref_outer.kind == crate::python_types::PyTypeKind::Class {
+                        if let JsonValue::Object(map) = data {
+                            if let Some(py_type_ref) = &type_info_ref_outer.py_type {
+                                let py_type_obj = py_type_ref.as_ref(py);
+                                // Try to update existing instance if it's for this type
+                                if let Some(existing_instance) = &self.partial_instance {
+                                    if existing_instance.as_ref(py).is_instance(py_type_obj)?
+                                        && !existing_instance.as_ref(py).is_instance_of::<PyDict>()
+                                    {
+                                        let updated_instance =
+                                            crate::python_types::update_instance_from_json(
+                                                py,
+                                                existing_instance.as_ref(py),
+                                                map,
+                                                &type_info_ref_outer.fields,
+                                            )?;
+                                        Some(updated_instance)
+                                    } else {
+                                        // Create new instance
+                                        let instance =
+                                            crate::python_types::create_instance_from_json(
+                                                py,
+                                                py_type_obj,
+                                                map,
+                                                &type_info_ref_outer.fields,
+                                            )?;
+                                        if !instance.as_ref(py).is_none()
+                                            && !instance.as_ref(py).is_instance_of::<PyDict>()
+                                        {
+                                            self.partial_instance = Some(instance.clone_ref(py));
+                                        }
+                                        Some(instance)
+                                    }
+                                } else {
+                                    // No existing instance, create new
+                                    let instance = crate::python_types::create_instance_from_json(
+                                        py,
+                                        py_type_obj,
+                                        map,
+                                        &type_info_ref_outer.fields,
+                                    )?;
+                                    if !instance.as_ref(py).is_none()
+                                        && !instance.as_ref(py).is_instance_of::<PyDict>()
+                                    {
+                                        self.partial_instance = Some(instance.clone_ref(py));
+                                    }
+                                    Some(instance)
+                                }
+                            } else {
+                                Some(json_to_python(py, data, self.type_info.as_ref())?)
+                            }
+                        } else {
+                            Some(json_to_python(py, data, self.type_info.as_ref())?)
+                        }
+                    }
+                    // Handle Union types - try to create instances for Class types in the union
+                    else if type_info_ref_outer.kind == crate::python_types::PyTypeKind::Union {
+                        if let JsonValue::Object(map) = data {
+                            // Check if any type in the union is a Class that we can instantiate
+                            for union_arg in &type_info_ref_outer.args {
+                                if union_arg.kind == crate::python_types::PyTypeKind::Class {
+                                    if let Some(py_type_ref) = &union_arg.py_type {
+                                        let py_type_obj = py_type_ref.as_ref(py);
+                                        // Try to create instance for this union member
+                                        if let Some(existing_instance) = &self.partial_instance {
+                                            if existing_instance
+                                                .as_ref(py)
+                                                .is_instance(py_type_obj)?
+                                                && !existing_instance
+                                                    .as_ref(py)
+                                                    .is_instance_of::<PyDict>()
+                                            {
+                                                let updated_instance =
+                                                    crate::python_types::update_instance_from_json(
+                                                        py,
+                                                        existing_instance.as_ref(py),
+                                                        map,
+                                                        &union_arg.fields,
+                                                    )?;
+                                                return Ok(Some(updated_instance));
+                                            }
+                                        }
+                                        // Try to create new instance for this union member
+                                        let instance =
+                                            crate::python_types::create_instance_from_json(
+                                                py,
+                                                py_type_obj,
+                                                map,
+                                                &union_arg.fields,
+                                            )?;
+                                        if !instance.as_ref(py).is_none()
+                                            && !instance.as_ref(py).is_instance_of::<PyDict>()
+                                        {
+                                            self.partial_instance = Some(instance.clone_ref(py));
+                                            return Ok(Some(instance));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Fall back to general json_to_python for Union types
+                        Some(json_to_python(py, data, self.type_info.as_ref())?)
+                    }
+                    // This case handles other types (List[str], Dict, etc.)
                     else {
-                        // self.type_info was None, or not List, or not List[Class]
                         Some(json_to_python(py, data, self.type_info.as_ref())?)
                     }
                 } else {

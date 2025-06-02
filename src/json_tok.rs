@@ -184,7 +184,11 @@ impl Tokenizer {
                         b if b.is_ascii_whitespace() => {
                             self.pos += 1;
                         }
-                        b => return Err(JsonError::UnexpectedChar(b as char)),
+                        _ => {
+                            // Treat any other character as the start of an identifier/unquoted string
+                            // This makes the parser more tolerant of unexpected characters
+                            self.state = InIdent { start: self.pos }
+                        }
                     }
                 }
 

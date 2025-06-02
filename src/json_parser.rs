@@ -465,6 +465,7 @@ impl Builder {
 
                 /* scalar value */
                 let val = parse_ident(tok).unwrap_or_else(|| JsonValue::String(tok.to_owned()));
+
                 self.push_path_for_scalar();
                 return self.finish_value_and_maybe_snapshot(val);
             }
