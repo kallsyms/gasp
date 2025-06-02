@@ -144,20 +144,20 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)] // Removed Default
 pub struct Builder {
     pub stack: Vec<Frame>,
-    path: Vec<PathItem>, // mirrors stack depth for snapshot emissions
-                         // target_type_info: Option<PyTypeInfo>, // REMOVED
+    path: Vec<PathItem>,
+    streaming: bool, // Added streaming flag
 }
 
 impl Builder {
-    pub fn new() -> Self {
-        // Updated constructor
+    pub fn new(streaming: bool) -> Self {
+        // Accept streaming flag
         Self {
             stack: Vec::new(),
             path: Vec::new(),
-            // target_type_info: None, // REMOVED
+            streaming,
         }
     }
 
@@ -219,6 +219,102 @@ impl Builder {
         }
     }
 
+    // Helper to build a JsonValue from the current stack, representing the root.
+    // This version recursively reconstructs the JsonValue from the live stack,
+    // ensuring partially built scalars are correctly represented.
+    fn current_root_json_value_snapshot(&self) -> Option<JsonValue> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        Some(Self::build_snapshot_from_stack_recursive(&self.stack, 0))
+    }
+
+    // Recursive helper to build a JsonValue snapshot from the parser's current stack.
+    // - stack: A slice representing the current parser stack.
+    // - frame_idx_on_stack: The index of the current frame in `stack` being processed.
+    fn build_snapshot_from_stack_recursive(
+        stack: &[Frame],
+        frame_idx_on_stack: usize,
+    ) -> JsonValue {
+        let current_frame_instance = &stack[frame_idx_on_stack];
+
+        // Base case: If this is the last frame on the stack, it's the active scalar
+        // (or an empty, just-opened container).
+        if frame_idx_on_stack == stack.len() - 1 {
+            return match current_frame_instance {
+                Frame::Str { buf } => JsonValue::String(buf.clone()),
+                Frame::Num { buf } => JsonValue::String(buf.clone()), // Partial numbers as string for snapshot
+                Frame::Ident { buf } => JsonValue::String(buf.clone()), // Partial idents as string for snapshot
+                Frame::Obj { .. } => JsonValue::Object(HashMap::new()), // Just opened '{'
+                Frame::Arr { .. } => JsonValue::Array(Vec::new()),      // Just opened '['
+            };
+        }
+
+        // Recursive step: This is a container frame that has a subsequent frame on the stack.
+        match current_frame_instance {
+            Frame::Obj {
+                map: completed_children_map,
+                last_key: active_child_key_opt,
+            } => {
+                let mut snapshot_map = HashMap::new();
+                // Copy all previously completed children for this object.
+                // These children are already full JsonValues.
+                for (k, v_json) in completed_children_map.iter() {
+                    snapshot_map.insert(k.clone(), v_json.clone());
+                }
+
+                // If there's an active_child_key, it means the *next* frame on the stack
+                // (stack[frame_idx_on_stack + 1]) is the value for this key.
+                // We need to build its snapshot recursively.
+                if let Some(key_for_active_child) = active_child_key_opt {
+                    // Ensure there is a next frame to process, otherwise, something is inconsistent.
+                    if frame_idx_on_stack + 1 < stack.len() {
+                        let active_child_value = Self::build_snapshot_from_stack_recursive(
+                            stack,
+                            frame_idx_on_stack + 1,
+                        );
+                        snapshot_map.insert(key_for_active_child.clone(), active_child_value);
+                    } else {
+                        // This case (active_child_key is Some, but no next frame on stack)
+                        // implies the key itself might be the last thing (e.g. {"key": <EOF>}).
+                        // Or the key is Frame::Str/Ident itself.
+                        // For a snapshot, if the key is active but value hasn't started,
+                        // we might represent it as key: null or omit it.
+                        // Current Frame::Obj structure implies last_key is for a *value* frame.
+                        // If the key itself is Frame::Str, it would be stack.last().
+                        // For simplicity, if key is active but no value frame, it won't be in snapshot.
+                    }
+                }
+                JsonValue::Object(snapshot_map)
+            }
+            Frame::Arr {
+                vec: completed_children_vec,
+            } => {
+                let mut snapshot_vec = Vec::new();
+                // Copy all previously completed children for this array.
+                for v_json in completed_children_vec.iter() {
+                    snapshot_vec.push(v_json.clone());
+                }
+
+                // The *next* frame on the stack (stack[frame_idx_on_stack + 1]) is a new item
+                // being added to this array (or an existing complex item being modified).
+                // Build its snapshot recursively and push it.
+                // This assumes that if there's a next frame, it belongs in this array.
+                if frame_idx_on_stack + 1 < stack.len() {
+                    let active_child_value =
+                        Self::build_snapshot_from_stack_recursive(stack, frame_idx_on_stack + 1);
+                    snapshot_vec.push(active_child_value);
+                }
+                JsonValue::Array(snapshot_vec)
+            }
+            // Scalar frames should have been handled by the base case if they are last on stack.
+            _ => unreachable!(
+                "Scalar frame encountered mid-stack during snapshot recursion. Frame: {:?}",
+                current_frame_instance
+            ),
+        }
+    }
+
     /// Feed a single scanner event, returning an optional snapshot.
     pub fn feed_event(
         &mut self,
@@ -246,39 +342,16 @@ impl Builder {
 
             /*──────── string chunks ─────────*/
             Event::StrChunk(chunk) => {
-                // record the depth **before** we mut-borrow anything
-                let depth = self.stack.len();
-                let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
-
-                if should_snapshot_scalar {
-                    if let Some(expected_item_type) =
-                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
-                    {
-                        if matches!(
-                            expected_item_type.kind,
-                            PyTypeKind::Class | PyTypeKind::Union
-                        ) {
-                            debug!("[Builder::feed_event] Suppressing scalar snapshot for StrChunk, expected class/union list item: {:?}", expected_item_type.name);
-                            should_snapshot_scalar = false;
-                        }
-                    }
-                }
-
                 self.ensure_string_frame();
-
                 if let Some(Frame::Str { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-
-                    if should_snapshot_scalar {
-                        // This will be false if suppressed
-                        debug!(
-                            "[Builder::feed_event] Emitting partial snapshot for StrChunk: {}",
-                            buf
-                        );
-                        return Ok(Some(Snapshot::Partial {
-                            path: self.path.clone(),
-                            value: JsonValue::String(buf.clone()),
-                        }));
+                    if self.streaming && !self.stack.is_empty() {
+                        if let Some(root_val) = self.current_root_json_value_snapshot() {
+                            return Ok(Some(Snapshot::Partial {
+                                path: Vec::new(),
+                                value: root_val,
+                            }));
+                        }
                     }
                 }
             }
@@ -322,39 +395,16 @@ impl Builder {
             }
 
             Event::NumberChunk(chunk) => {
-                let depth = self.stack.len(); // capture depth first
-                let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
-
-                if should_snapshot_scalar {
-                    if let Some(expected_item_type) =
-                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
-                    {
-                        if matches!(
-                            expected_item_type.kind,
-                            PyTypeKind::Class | PyTypeKind::Union
-                        ) {
-                            debug!("[Builder::feed_event] Suppressing scalar snapshot for NumberChunk, expected class/union list item: {:?}", expected_item_type.name);
-                            should_snapshot_scalar = false;
-                        }
-                    }
-                }
-
                 self.ensure_num_frame();
-
                 if let Some(Frame::Num { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-
-                    if should_snapshot_scalar {
-                        // This will be false if suppressed
-                        let val = JsonValue::Number(parse_number(buf)?);
-                        debug!(
-                            "[Builder::feed_event] Emitting partial snapshot for NumberChunk: {}",
-                            buf
-                        );
-                        return Ok(Some(Snapshot::Partial {
-                            path: self.path.clone(),
-                            value: val,
-                        }));
+                    if self.streaming && !self.stack.is_empty() {
+                        if let Some(root_val) = self.current_root_json_value_snapshot() {
+                            return Ok(Some(Snapshot::Partial {
+                                path: Vec::new(),
+                                value: root_val,
+                            }));
+                        }
                     }
                 }
             }
@@ -374,40 +424,16 @@ impl Builder {
                 return self.finish_value_and_maybe_snapshot(JsonValue::Number(num));
             }
             Event::IdentChunk(chunk) => {
-                let depth = self.stack.len(); // capture depth first
-                let mut should_snapshot_scalar = depth == 2 && self.parent_wants_value();
-
-                if should_snapshot_scalar {
-                    if let Some(expected_item_type) =
-                        self.get_expected_type_for_feed_event_scalar_snapshot(root_target_type)
-                    {
-                        if matches!(
-                            expected_item_type.kind,
-                            PyTypeKind::Class | PyTypeKind::Union
-                        ) {
-                            debug!("[Builder::feed_event] Suppressing scalar snapshot for IdentChunk, expected class/union list item: {:?}", expected_item_type.name);
-                            should_snapshot_scalar = false;
-                        }
-                    }
-                }
-
                 self.ensure_ident_frame();
-
                 if let Some(Frame::Ident { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-
-                    if should_snapshot_scalar {
-                        // This will be false if suppressed
-                        let val =
-                            parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf)));
-                        debug!(
-                            "[Builder::feed_event] Emitting partial snapshot for IdentChunk: {}",
-                            buf
-                        );
-                        return Ok(Some(Snapshot::Partial {
-                            path: self.path.clone(),
-                            value: val,
-                        }));
+                    if self.streaming && !self.stack.is_empty() {
+                        if let Some(root_val) = self.current_root_json_value_snapshot() {
+                            return Ok(Some(Snapshot::Partial {
+                                path: Vec::new(),
+                                value: root_val,
+                            }));
+                        }
                     }
                 }
             }
@@ -587,22 +613,58 @@ impl Builder {
             });
         }
 
-        // depth‑1 snapshot?
-        if self.depth() == 1 {
-            let snap_val = match self.stack.last().unwrap() {
+        // Snapshotting logic:
+        // If streaming, and the stack is not empty (meaning there's a root structure),
+        // always emit a snapshot of the root frame's current value.
+        if self.streaming && !self.stack.is_empty() {
+            let root_frame_for_snapshot = self.stack.first().unwrap(); // Snapshot the actual root
+            let snap_val = match root_frame_for_snapshot {
                 Frame::Obj { map, .. } => JsonValue::Object(map.clone()),
                 Frame::Arr { vec } => JsonValue::Array(vec.clone()),
-                _ => val.clone(),
+                // If root is somehow a scalar frame after an update, this is unusual.
+                // This case should ideally be handled by how `val` is pushed onto stack if it's a root scalar.
+                // For now, if stack[0] is scalar, this indicates an issue or a very simple JSON (e.g. just "string").
+                // The `json_to_python` coercion handles a root scalar becoming `List[Class(content=scalar)]`.
+                Frame::Str { buf } => JsonValue::String(buf.clone()), // Raw buffer content
+                Frame::Num { buf } => JsonValue::String(buf.clone()), // Raw buffer content (will be parsed later by json_to_python if needed)
+                Frame::Ident { buf } => JsonValue::String(buf.clone()), // Raw buffer content
             };
+
+            // For these root snapshots, path is empty.
             let snapshot = Snapshot::Partial {
-                path: self.path.clone(),
+                path: Vec::new(), // Path for root snapshot is empty
                 value: snap_val,
             };
+            // After 'val' is processed and added to its parent, its specific path component should be popped.
+            // This happens regardless of snapshotting the root.
+            // If val was a scalar, its path was pushed by ensure_X_frame or push_path_for_scalar.
+            // If val was a container, finish_container already popped its path.
+            // This logic assumes that if 'val' is not a container, its path needs popping.
+            if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
+                if !self.path.is_empty() {
+                    debug!("[finish_value_and_maybe_snapshot] Popping path for scalar value after root snapshot. Path: {:?}", self.path);
+                    self.path.pop();
+                }
+            }
             return Ok(Some(snapshot));
+        } else if !self.streaming && self.stack.is_empty() {
+            // Non-streaming, val is the complete root.
+            // If val was a scalar, its path was pushed. Pop it.
+            if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
+                if !self.path.is_empty() {
+                    self.path.pop();
+                }
+            }
+            return Ok(Some(Snapshot::Complete(val)));
         }
-        // Clean path when value done.
-        if !self.path.is_empty() {
-            self.path.pop();
+
+        // If no snapshot was emitted, 'val' was processed and added to parent.
+        // Pop path for 'val' if it's a scalar (container paths popped by finish_container).
+        if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
+            if !self.path.is_empty() {
+                debug!("[finish_value_and_maybe_snapshot] Popping path for scalar value (no root snapshot). Path: {:?}", self.path);
+                self.path.pop();
+            }
         }
         Ok(None)
     }
@@ -845,18 +907,17 @@ pub struct Parser {
 
 impl Default for Parser {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(false) // Default is non-streaming for Builder
     }
 }
 
 impl Parser {
     pub fn new(streaming: bool) -> Self {
-        // target_type_info removed from constructor
         Self {
             scanner: Scanner::new(),
-            builder: Builder::new(), // Builder::new() no longer takes target_type_info
+            builder: Builder::new(streaming), // Pass streaming to Builder
             buf: String::new(),
-            streaming: streaming,
+            streaming: streaming, // Parser also keeps track of streaming mode
         }
     }
 
@@ -875,10 +936,14 @@ impl Parser {
             match self.scanner.next_step() {
                 ScanStep::Event(ev) => {
                     // Pass root_target_type to builder.feed_event
-                    if let Some(Snapshot::Complete(v)) =
-                        self.builder.feed_event(ev, root_target_type)?
-                    {
-                        return Ok(v);
+                    match self.builder.feed_event(ev, root_target_type)? {
+                        Some(Snapshot::Partial { value, .. }) => {
+                            // If Builder now always returns the root value in Snapshot::Partial
+                            // and Parser::parse is expected to yield this value for streaming.
+                            return Ok(value);
+                        }
+                        Some(Snapshot::Complete(v)) => return Ok(v),
+                        None => {} // Continue processing events
                     }
                 }
                 ScanStep::NeedMore => {
