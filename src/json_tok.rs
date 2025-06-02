@@ -240,18 +240,6 @@ impl Tokenizer {
                             return Ok(tok);
                         }
 
-                        /* ───── structural characters that likely end an unclosed string ───── */
-                        if b == b'}' || b == b']' || b == b',' {
-                            // Treat this as the end of an unclosed string
-                            let tok = Tok {
-                                kind: Kind::StrEnd,
-                                start: *start,
-                                end: self.pos,
-                            };
-                            self.state = LState::Start; // leave string mode (don't consume the structural char)
-                            return Ok(tok);
-                        }
-
                         /* ordinary UTF-8 byte inside the string */
                         self.pos += 1;
                     }
