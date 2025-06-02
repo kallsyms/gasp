@@ -61,7 +61,7 @@ impl TypedStreamParser {
     /// Process a chunk of JSON data
     pub fn step(&mut self, chunk: &str) -> PyResult<Option<JsonValue>> {
         // Use the stream parser to process the chunk, passing stored type_info
-        let result = match self.stream_parser.step(chunk, self.type_info.as_ref()) {
+        let result = match self.stream_parser.step(chunk) {
             Ok(val) => val,
             Err(e) => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(

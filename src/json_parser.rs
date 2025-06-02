@@ -1,6 +1,4 @@
-use crate::json_tok::{Kind, Tok, Tokenizer}; // Keep for now, might be used by other parts of json_parser
 use crate::json_types::{JsonError, JsonValue, Number};
-use crate::python_types::{PyTypeInfo, PyTypeKind}; // Added PyTypeInfo and PyTypeKind
 use crate::tag_finder::{TagEvent, TagFinder};
 use log::debug;
 use std::collections::{HashMap, HashSet};
@@ -110,7 +108,7 @@ pub enum Snapshot {
 /*──────────────────────────── Builder internals ──────────────────────*/
 
 #[derive(Debug, Clone)]
-enum Frame {
+pub enum Frame {
     Obj {
         map: HashMap<String, JsonValue>,
         last_key: Option<String>,
@@ -129,21 +127,6 @@ enum Frame {
     },
 }
 
-impl Frame {
-    fn as_obj_mut(&mut self) -> &mut HashMap<String, JsonValue> {
-        match self {
-            Frame::Obj { map, .. } => map,
-            _ => unreachable!(),
-        }
-    }
-    fn as_arr_mut(&mut self) -> &mut Vec<JsonValue> {
-        match self {
-            Frame::Arr { vec } => vec,
-            _ => unreachable!(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)] // Removed Default
 pub struct Builder {
     pub stack: Vec<Frame>,
@@ -159,48 +142,6 @@ impl Builder {
             path: Vec::new(),
             streaming,
         }
-    }
-
-    // Helper to get the expected type for an item in the current array context
-    // This version is for use in feed_event for snapshot suppression.
-    fn get_expected_type_for_feed_event_scalar_snapshot<'a>(
-        &self,
-        root_target_type: Option<&'a PyTypeInfo>,
-    ) -> Option<&'a PyTypeInfo> {
-        // Check if the parent frame (one level up from current scalar) is an Array.
-        if self.stack.len() >= 2 {
-            // Need at least a parent and current scalar frame
-            if let Some(Frame::Arr { .. }) = self.stack.get(self.stack.len() - 2) {
-                // Parent is an array. What is its element type?
-                // This simplified version assumes the root_target_type is List[X]
-                // and we are in that top-level list.
-                // A full solution would trace self.path through root_target_type.
-                if let Some(rt_type) = root_target_type {
-                    if rt_type.kind == PyTypeKind::List && !rt_type.args.is_empty() {
-                        return Some(&rt_type.args[0]);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    // Helper for Builder::finish to determine expected item type if stack is [Arr, Scalar]
-    fn get_expected_type_for_array_item_in_finish<'a>(
-        &self,
-        root_target_type: Option<&'a PyTypeInfo>,
-    ) -> Option<&'a PyTypeInfo> {
-        if self.stack.len() == 2 {
-            // Specifically for [Arr, ScalarFrame] stack
-            if let Some(Frame::Arr { .. }) = self.stack.first() {
-                if let Some(rt_type) = root_target_type {
-                    if rt_type.kind == PyTypeKind::List && !rt_type.args.is_empty() {
-                        return Some(&rt_type.args[0]);
-                    }
-                }
-            }
-        }
-        None
     }
 
     fn push_path_for_scalar(&mut self) {
@@ -279,6 +220,7 @@ impl Builder {
                 map: completed_children_map,
                 last_key: active_child_key_opt,
             } => {
+                println!("[DEBUG] Object frame - completed_children_map: {:?}, active_child_key_opt: {:?}, frame_idx_on_stack: {}, stack.len(): {}", completed_children_map, active_child_key_opt, frame_idx_on_stack, stack.len());
                 let mut snapshot_map = HashMap::new();
                 // Copy all previously completed children for this object.
                 // These children are already full JsonValues.
@@ -290,24 +232,48 @@ impl Builder {
                 // (stack[frame_idx_on_stack + 1]) is the value for this key.
                 // We need to build its snapshot recursively.
                 if let Some(key_for_active_child) = active_child_key_opt {
-                    // Ensure there is a next frame to process, otherwise, something is inconsistent.
+                    // Key is complete, value is active
                     if frame_idx_on_stack + 1 < stack.len() {
                         let active_child_value = Self::build_snapshot_from_stack_recursive(
                             stack,
                             frame_idx_on_stack + 1,
                         );
+                        println!(
+                            "[DEBUG] Adding key '{}' with child value from next frame",
+                            key_for_active_child
+                        );
                         snapshot_map.insert(key_for_active_child.clone(), active_child_value);
                     } else {
-                        // This case (active_child_key is Some, but no next frame on stack)
-                        // implies the key itself might be the last thing (e.g. {"key": <EOF>}).
-                        // Or the key is Frame::Str/Ident itself.
-                        // For a snapshot, if the key is active but value hasn't started,
-                        // we might represent it as key: null or omit it.
-                        // Current Frame::Obj structure implies last_key is for a *value* frame.
-                        // If the key itself is Frame::Str, it would be stack.last().
-                        // For simplicity, if key is active but no value frame, it won't be in snapshot.
+                        // Key is complete but value hasn't started yet (no next frame)
+                        // Show the key with an empty string value
+                        println!(
+                            "[DEBUG] Adding key '{}' with empty string value (no next frame)",
+                            key_for_active_child
+                        );
+                        snapshot_map.insert(
+                            key_for_active_child.clone(),
+                            JsonValue::String("".to_string()),
+                        );
+                    }
+                } else {
+                    // Key might be active
+                    if frame_idx_on_stack + 1 < stack.len() {
+                        // The next frame is the key itself being formed
+                        let key_snapshot = Self::build_snapshot_from_stack_recursive(
+                            stack,
+                            frame_idx_on_stack + 1,
+                        );
+                        if let JsonValue::String(key_str) = key_snapshot {
+                            // Key is partially formed, show it with an empty string value
+                            if !key_str.is_empty() {
+                                // Avoid inserting empty key if key_str is empty
+                                snapshot_map.insert(key_str, JsonValue::String("".to_string()));
+                            }
+                        }
+                        // If key_snapshot is not a String, it's an invalid state for a key, ignore for snapshot.
                     }
                 }
+                println!("[DEBUG] Final snapshot_map: {:?}", snapshot_map);
                 JsonValue::Object(snapshot_map)
             }
             Frame::Arr {
@@ -339,11 +305,7 @@ impl Builder {
     }
 
     /// Feed a single scanner event, returning an optional snapshot.
-    pub fn feed_event(
-        &mut self,
-        ev: Event,
-        root_target_type: Option<&PyTypeInfo>,
-    ) -> Result<Option<Snapshot>, JsonError> {
+    pub fn feed_event(&mut self, ev: Event) -> Result<Option<Snapshot>, JsonError> {
         // Added root_target_type
         match ev {
             /*──────── structural open ───────*/
@@ -368,21 +330,22 @@ impl Builder {
                 self.ensure_string_frame();
                 if let Some(Frame::Str { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-                    if self.streaming && !self.stack.is_empty() {
-                        if let Some(root_val) = self.current_root_json_value_snapshot() {
-                            return Ok(Some(Snapshot::Partial {
-                                path: Vec::new(),
-                                value: root_val,
-                            }));
-                        }
+                    if self.streaming {
+                        // For streaming, snapshot the partial string being built.
+                        return Ok(Some(Snapshot::Partial {
+                            path: self.path.clone(), // Path to the current scalar
+                            value: JsonValue::String(buf.clone()),
+                        }));
                     }
                 }
             }
 
             Event::StrEnd(chunk) => {
+                println!("[DEBUG] StrEnd: '{}'", chunk);
                 // ── 1. Are we in an object and still waiting for the key?
                 if let Some(Frame::Obj { last_key, .. }) = self.stack.last_mut() {
                     if last_key.is_none() {
+                        println!("[DEBUG] Setting key: '{}'", chunk);
                         *last_key = Some(chunk.to_owned()); // treat ident/string as the key
                         return Ok(None); // no value yet
                     }
@@ -421,13 +384,12 @@ impl Builder {
                 self.ensure_num_frame();
                 if let Some(Frame::Num { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-                    if self.streaming && !self.stack.is_empty() {
-                        if let Some(root_val) = self.current_root_json_value_snapshot() {
-                            return Ok(Some(Snapshot::Partial {
-                                path: Vec::new(),
-                                value: root_val,
-                            }));
-                        }
+                    if self.streaming {
+                        return Ok(Some(Snapshot::Partial {
+                            path: self.path.clone(), // Path to the current scalar
+                            // Represent partial number as string for snapshot
+                            value: JsonValue::String(buf.clone()),
+                        }));
                     }
                 }
             }
@@ -450,13 +412,12 @@ impl Builder {
                 self.ensure_ident_frame();
                 if let Some(Frame::Ident { buf }) = self.stack.last_mut() {
                     buf.push_str(chunk);
-                    if self.streaming && !self.stack.is_empty() {
-                        if let Some(root_val) = self.current_root_json_value_snapshot() {
-                            return Ok(Some(Snapshot::Partial {
-                                path: Vec::new(),
-                                value: root_val,
-                            }));
-                        }
+                    if self.streaming {
+                        return Ok(Some(Snapshot::Partial {
+                            path: self.path.clone(), // Path to the current scalar
+                            // Represent partial ident as string for snapshot
+                            value: JsonValue::String(buf.clone()),
+                        }));
                     }
                 }
             }
@@ -511,10 +472,6 @@ impl Builder {
         Ok(None)
     }
 
-    fn depth(&self) -> usize {
-        self.stack.len()
-    }
-
     fn start_container(&mut self, frame: Frame) {
         // Path bookkeeping for snapshots
         if let Some(Frame::Arr { vec }) = self.stack.last_mut() {
@@ -559,16 +516,6 @@ impl Builder {
 
             // 2. start accumulating the number chunks
             self.stack.push(Frame::Num { buf: String::new() });
-        }
-    }
-
-    fn parent_wants_value(&self) -> bool {
-        match self.stack.get(self.stack.len() - 2).unwrap() {
-            // Arrays are always waiting for a value
-            Frame::Arr { .. } => true,
-            // Objects want a value only after the key has been completed
-            Frame::Obj { last_key, .. } => last_key.is_some(),
-            _ => false,
         }
     }
 
@@ -693,11 +640,7 @@ impl Builder {
         Ok(None)
     }
 
-    pub fn finish(
-        &mut self,
-        streaming: bool,
-        root_target_type: Option<&PyTypeInfo>,
-    ) -> Result<JsonValue, JsonError> {
+    pub fn finish(&mut self, streaming: bool) -> Result<JsonValue, JsonError> {
         // Added root_target_type
         /*──────────── when we’re *inside* something at EOF / NeedMore ───────────*/
         if self.stack.is_empty() {
@@ -758,8 +701,8 @@ impl Builder {
 #[derive(Debug)]
 pub struct Parser {
     // This is json_parser::Parser (internal)
-    scanner: Scanner,
-    builder: Builder,
+    pub scanner: Scanner,
+    pub builder: Builder,
     buf: String,
     streaming: bool,
 }
@@ -781,11 +724,7 @@ impl Parser {
     }
 
     // root_target_type is passed from StreamParser::step
-    pub fn parse(
-        &mut self,
-        bytes: Vec<u8>,
-        root_target_type: Option<&PyTypeInfo>,
-    ) -> Result<JsonValue, JsonError> {
+    pub fn parse(&mut self, bytes: Vec<u8>) -> Result<JsonValue, JsonError> {
         let part = String::from_utf8(bytes).unwrap();
         self.buf = self.buf.clone() + &part;
 
@@ -795,19 +734,35 @@ impl Parser {
             match self.scanner.next_step() {
                 ScanStep::Event(ev) => {
                     // Pass root_target_type to builder.feed_event
-                    match self.builder.feed_event(ev, root_target_type)? {
-                        Some(Snapshot::Partial { value, .. }) => {
-                            // If Builder now always returns the root value in Snapshot::Partial
-                            // and Parser::parse is expected to yield this value for streaming.
-                            return Ok(value);
+                    match self.builder.feed_event(ev)? {
+                        Some(Snapshot::Partial { .. }) => {
+                            // path and value from this snapshot are not directly used by the caller of parse()
+                            // A partial snapshot was emitted by the builder.
+                            // The value to return from parse() should be the current root JSON structure.
+                            // current_root_json_value_snapshot() should provide this.
+                            // It's assumed that if feed_event produced Some(Snapshot::Partial),
+                            // then current_root_json_value_snapshot() will also produce Some.
+                            if let Some(root_val) = self.builder.current_root_json_value_snapshot()
+                            {
+                                return Ok(root_val);
+                            } else {
+                                // This state (feed_event gave Some, but current_root_json_value_snapshot gave None)
+                                // should ideally not be reached. If it is, it implies an inconsistency.
+                                // For robustness, treat as if no new complete value is ready from this event.
+                                // log::warn!("Inconsistent snapshot state in Parser::parse");
+                            }
                         }
-                        Some(Snapshot::Complete(v)) => return Ok(v),
-                        None => {} // Continue processing events
+                        Some(Snapshot::Complete(v)) => return Ok(v), // Usually for non-streaming mode
+                        None => {} // Event processed, but no new value/snapshot (e.g., key completed)
                     }
                 }
                 ScanStep::NeedMore => {
                     // End of buffer – finish. Pass root_target_type to builder.finish
-                    return self.builder.finish(self.streaming, root_target_type);
+                    let result = self.builder.finish(self.streaming);
+                    // After builder finishes (especially if it finalized a partial scalar),
+                    // reset the scanner's internal token buffer and lexer state if it was mid-scalar.
+                    self.scanner.reset_tok_buf_and_lexer_state_if_mid_scalar();
+                    return result;
                 }
                 ScanStep::Error(e) => return Err(e),
             }
@@ -826,7 +781,6 @@ pub struct StreamParser {
     done: bool,
     wanted: HashSet<String>,
     ignored: HashSet<String>,
-    // target_type_info: Option<PyTypeInfo>, // REMOVED - will be passed to step()
 }
 
 impl default::Default for StreamParser {
@@ -877,11 +831,7 @@ impl StreamParser {
     }
 
     // root_target_type is passed from TypedStreamParser (in src/parser.rs)
-    pub fn step(
-        &mut self,
-        chunk: &str,
-        root_target_type: Option<&PyTypeInfo>,
-    ) -> Result<Option<JsonValue>, JsonError> {
+    pub fn step(&mut self, chunk: &str) -> Result<Option<JsonValue>, JsonError> {
         if self.done {
             debug!(
                 "[json_parser::StreamParser::step] Already done. Chunk: '{}'",
@@ -905,9 +855,7 @@ impl StreamParser {
                 TagEvent::Bytes(bytes) => {
                     if self.capturing {
                         // Pass root_target_type to inner.parse()
-                        let parse_res = self
-                            .inner
-                            .parse(bytes.as_bytes().to_vec(), root_target_type);
+                        let parse_res = self.inner.parse(bytes.as_bytes().to_vec());
                         match parse_res {
                             Ok(JsonValue::Array(arr)) => {
                                 latest = if arr.len() == 1 {
@@ -926,8 +874,19 @@ impl StreamParser {
                     let name_lower = name.to_lowercase();
                     let is_wanted_tag = self.wanted.is_empty() || self.wanted.contains(&name_lower);
                     if self.capturing && is_wanted_tag {
-                        // Pass root_target_type to builder.finish
-                        latest = Some(self.inner.builder.finish(true, root_target_type)?);
+                        // Process any remaining events in the scanner before finishing
+                        loop {
+                            match self.inner.scanner.next_step() {
+                                ScanStep::Event(ev) => {
+                                    // Feed event to the builder, ignore snapshot for this flush
+                                    self.inner.builder.feed_event(ev)?;
+                                }
+                                ScanStep::NeedMore => break, // No more events to process from buffer
+                                ScanStep::Error(e) => return Err(e), // Propagate scanner error
+                            }
+                        }
+                        // Now finish with the builder
+                        latest = Some(self.inner.builder.finish(true)?);
                         self.done = true;
                         self.capturing = false;
                     }
@@ -1005,7 +964,7 @@ mod tests {
             while i < bytes.len() {
                 let end   = usize::min(i + chunk_sz, bytes.len());
                 let chunk = std::str::from_utf8(&bytes[i..end]).unwrap();
-                end_val = sp.step(chunk, None).unwrap(); // step takes 2 args (chunk, root_target_type)
+                end_val = sp.step(chunk).unwrap(); // step takes 2 args (chunk, root_target_type)
                 i = end;
             }
 
@@ -1033,7 +992,7 @@ mod tests {
         let mut sp = StreamParser::default(); // StreamParser::new takes 2 args, default calls new(vec![], vec![])
 
         // ── first chunk ───────────────────────────
-        let part1 = sp.step(chunk1, None).expect("stream step 1 failed"); // step takes 2 args
+        let part1 = sp.step(chunk1).expect("stream step 1 failed"); // step takes 2 args
         assert!(!sp.is_done(), "should not be done after first chunk");
 
         // We expect a partial with only the first key.
@@ -1049,7 +1008,7 @@ mod tests {
         }
 
         // ── second chunk ──────────────────────────
-        let part2 = sp.step(chunk2, None).expect("stream step 2 failed"); // step takes 2 args
+        let part2 = sp.step(chunk2).expect("stream step 2 failed"); // step takes 2 args
         assert!(sp.is_done(), "parser should be done after close tag");
 
         // Final value must contain both fields.
@@ -1064,7 +1023,7 @@ mod tests {
         }
 
         // Further calls after done yield None.
-        assert!(sp.step("", None).unwrap().is_none()); // step takes 2 args
+        assert!(sp.step("").unwrap().is_none()); // step takes 2 args
     }
 
     #[test]
@@ -1083,49 +1042,98 @@ mod tests {
         let mut snapshot = None;
 
         for (i, slice) in chunks.iter().enumerate() {
-            snapshot = sp.step(slice, None).expect("stream step failed"); // step takes 2 args
+            println!("Chunk {}: Processing '{}'", i, slice);
+            snapshot = sp.step(slice).expect("stream step failed"); // step takes 2 args
+            println!("Chunk {}: Snapshot: {:?}", i, snapshot);
 
             // we should only be 'done' after the last chunk
             assert_eq!(sp.is_done(), i == chunks.len() - 1);
 
             match (i, &snapshot) {
-                // after chunk 0 we have nothing useful yet
-                (0, Some(JsonValue::String(n))) => {}
+                // Chunk 0: r#"<User>{"na"#
+                // Snapshot: Object({"na": String("")}) - key "na" is partially formed
+                (0, Some(JsonValue::Object(m))) => {
+                    assert_eq!(m.len(), 1, "Chunk 0: Expected 1 key");
+                    assert_eq!(
+                        m.get("na").unwrap(),
+                        &JsonValue::String("".into()),
+                        "Chunk 0: Key 'na' should have empty string value"
+                    );
+                }
 
-                // after chunk 1 the object should contain the first field
+                // Chunk 1: r#"me": "Al"#
+                // Snapshot: Object({"name": String("Al")}) - key "name" complete, value "Al" (partial string)
                 (1, Some(JsonValue::Object(m))) => {
-                    assert_eq!(m.len(), 1);
-                    assert_eq!(m.get("name").unwrap(), &JsonValue::String("Al".into()));
+                    assert_eq!(m.len(), 1, "Chunk 1: Expected 1 key");
+                    assert_eq!(
+                        m.get("name").unwrap(),
+                        &JsonValue::String("Al".into()),
+                        "Chunk 1: Value for 'name' should be 'Al'"
+                    );
                 }
+
+                // Chunk 2: r#"die", "#
+                // Snapshot: Object({"name": String("Aldie")}) - value "Aldie" complete
                 (2, Some(JsonValue::Object(m))) => {
-                    assert_eq!(m.len(), 1);
-                    assert_eq!(m.get("name").unwrap(), &JsonValue::String("Aldie".into()));
+                    assert_eq!(m.len(), 1, "Chunk 2: Expected 1 key");
+                    assert_eq!(
+                        m.get("name").unwrap(),
+                        &JsonValue::String("Aldie".into()),
+                        "Chunk 2: Value for 'name' should be 'Aldie'"
+                    );
                 }
 
-                // after chunk 3 we still expect the same 1-field object
+                // Chunk 3: r#" "age": "#
+                // Snapshot: Object({"name": String("Aldie")}) - only complete key-value pairs
+                // "age" key is parsed but has no value yet, so it's not included in snapshot
                 (3, Some(JsonValue::Object(m))) => {
-                    assert_eq!(m.len(), 1);
-                }
-                (4, Some(JsonValue::Object(m))) => {
+                    assert_eq!(m.len(), 1, "Chunk 3: Expected 1 key (only complete pairs)");
                     assert_eq!(
-                        m.get("age").unwrap(),
-                        &JsonValue::Number(Number::Integer(3))
+                        m.get("name").unwrap(),
+                        &JsonValue::String("Aldie".into()),
+                        "Chunk 3: Value for 'name' should be 'Aldie'"
                     );
+                    // "age" key should not appear in snapshot until it has a value
                 }
-                // after final slice "0}"
-                (5, Some(JsonValue::Object(m))) => {
+
+                // Chunk 4: r#"3"#
+                // Snapshot: Object({"name": String("Aldie"), "age": String("3")}) - value "3" (partial number)
+                (4, Some(JsonValue::Object(m))) => {
+                    assert_eq!(m.len(), 2, "Chunk 4: Expected 2 keys");
+                    assert_eq!(
+                        m.get("name").unwrap(),
+                        &JsonValue::String("Aldie".into()),
+                        "Chunk 4: Value for 'name' should be 'Aldie'"
+                    );
                     assert_eq!(
                         m.get("age").unwrap(),
-                        &JsonValue::Number(Number::Integer(30))
+                        &JsonValue::String("3".into()), // Partial number represented as string
+                        "Chunk 4: Value for 'age' should be '3'"
                     );
                 }
 
-                _ => panic!("unexpected snapshot at chunk {}", i),
+                // Chunk 5: r#"0}</User> garbage"#
+                // Snapshot: Object({"name": String("Aldie"), "age": Number(Integer(30))}) - value 30 complete
+                (5, Some(JsonValue::Object(m))) => {
+                    assert_eq!(m.len(), 2, "Chunk 5: Expected 2 keys");
+                    assert_eq!(
+                        m.get("name").unwrap(),
+                        &JsonValue::String("Aldie".into()),
+                        "Chunk 5: Value for 'name' should be 'Aldie'"
+                    );
+                    assert_eq!(
+                        m.get("age").unwrap(),
+                        &JsonValue::Number(Number::Integer(30)),
+                        "Chunk 5: Value for 'age' should be 30"
+                    );
+                }
+
+                _ => panic!("unexpected snapshot at chunk {}: {:?}", i, snapshot),
             }
         }
 
         // further calls after done should yield None
-        assert!(sp.step("", None).unwrap().is_none()); // step takes 2 args
+        assert!(sp.step("").unwrap().is_none()); // step takes 2 args
     }
 
     #[test]
@@ -1139,7 +1147,7 @@ mod tests {
             let mut last = None;
 
             for (i, part) in chunks.iter().enumerate() {
-                last = sp.step(part, None).expect("stream step failed"); // step takes 2 args
+                last = sp.step(part).expect("stream step failed"); // step takes 2 args
                 assert_eq!(sp.is_done(), i == chunks.len() - 1);
             }
             last.expect("no final value produced")
@@ -1274,7 +1282,6 @@ mod tests {
             m.insert("obj".into(), JsonValue::Object(obj));
             JsonValue::Object(m)
         };
-        let joined: String = case10.concat();
         assert_eq!(run(&case10), exp10);
 
         // ──────────────────────────────────────────────────────────────────────
@@ -1285,7 +1292,7 @@ mod tests {
         // Test comma-separated
         let input = r#"{"message": 123},{"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -1310,7 +1317,7 @@ mod tests {
         // Test space-separated
         let input = r#"{"message": 123} {"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -1338,7 +1345,7 @@ mod tests {
             .as_bytes()
             .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -1363,7 +1370,7 @@ mod tests {
         // Test no separation
         let input = r#"{"message": 123}{"code": 404}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -1390,7 +1397,7 @@ mod tests {
     fn test_simple_string() {
         let input = r#""hello world""#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::String(s)) => assert_eq!(s, "hello world"),
             _ => panic!("Expected string value"),
@@ -1401,7 +1408,7 @@ mod tests {
     fn test_string_escapes() {
         let input = r#""hello\nworld\t\"quote\"""#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::String(s)) => assert_eq!(s, "hello\nworld\t\"quote\""),
             _ => panic!("Expected string value"),
@@ -1412,7 +1419,7 @@ mod tests {
     fn test_simple_number() {
         let input = "42".as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Number(Number::Integer(n))) => assert_eq!(n, 42),
             _ => panic!("Expected integer value"),
@@ -1423,7 +1430,7 @@ mod tests {
     fn test_float_number() {
         let input = "42.5".as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Number(Number::Float(n))) => assert_eq!(n, 42.5),
             _ => panic!("Expected float value"),
@@ -1434,7 +1441,7 @@ mod tests {
     fn test_simple_object() {
         let input = r#"{"key": "value"}"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 1);
@@ -1451,7 +1458,7 @@ mod tests {
     fn test_simple_array() {
         let input = r#"[1, 2, 3]"#.as_bytes().to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -1478,7 +1485,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
@@ -1521,7 +1528,7 @@ mod tests {
 
         for (input, expected_err) in cases {
             let mut parser = Parser::default();
-            match parser.parse(input.as_bytes().to_vec(), None) {
+            match parser.parse(input.as_bytes().to_vec()) {
                 // Added None
                 Err(e) => assert_eq!(e, expected_err),
                 Ok(_) => panic!("Expected error for input: {}", input),
@@ -1539,7 +1546,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
@@ -1562,7 +1569,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 2);
@@ -1589,7 +1596,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 2);
@@ -1616,7 +1623,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 3);
@@ -1635,7 +1642,7 @@ mod tests {
             .as_bytes()
             .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -1671,7 +1678,7 @@ mod tests {
         .as_bytes()
         .to_vec();
         let mut parser = Parser::default();
-        match parser.parse(input, None) {
+        match parser.parse(input) {
             // Added None
             Ok(JsonValue::Object(map)) => {
                 assert_eq!(map.len(), 4);
@@ -1720,7 +1727,7 @@ mod tests {
             let end = usize::min(i + 1, bytes.len());
             let chunk = std::str::from_utf8(&bytes[i..end]).unwrap();
 
-            end_val = parser.step(chunk, None).unwrap(); // Added None for root_target_type
+            end_val = parser.step(chunk).unwrap(); // Added None for root_target_type
             i = end;
         }
         assert!(parser.is_done(), "stream parser did not finish");
@@ -1779,7 +1786,7 @@ mod tests {
         // Process each fragment
         for (i, fragment) in fragments.iter().enumerate() {
             println!("Fragment {}: '{}'", i, fragment);
-            if let Some(result) = parser.step(fragment, None).unwrap() {
+            if let Some(result) = parser.step(fragment).unwrap() {
                 // Added None for root_target_type
                 println!("  Got result: {:?}", result);
                 results.push(result);
@@ -1851,7 +1858,7 @@ mod tests {
         // Process each fragment
         for (i, fragment) in fragments.iter().enumerate() {
             println!("LLM output: {}", fragment);
-            let result = parser.step(fragment, None).unwrap(); // Added None for root_target_type
+            let result = parser.step(fragment).unwrap(); // Added None for root_target_type
             if result.is_some() {
                 println!("Parser result: {:?}", result.unwrap());
             } else {

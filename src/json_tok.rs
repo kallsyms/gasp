@@ -97,6 +97,29 @@ impl Tokenizer {
         }
     }
 
+    /// If the tokenizer is currently in a state of accumulating a string, number,
+    /// or identifier token, this method resets its state back to `LState::Start`.
+    /// This is intended to be called by the `Scanner` after a `NeedMore` step
+    /// if the `Builder` has already finalized a partial scalar based on the
+    /// content up to `NeedMore`. This prevents the `Tokenizer` from incorrectly
+    /// appending subsequent, unrelated characters to its internal token buffer (`tok_buf`)
+    /// for a token that has effectively already been consumed by the builder.
+    pub fn reset_state_if_mid_scalar_token(&mut self) {
+        match self.state {
+            LState::InString { .. } | LState::InNumber { .. } | LState::InIdent { .. } => {
+                self.state = LState::Start;
+                // Note: We don't clear tok_buf here as Tokenizer doesn't own it.
+                // The Scanner is responsible for managing its own buffer (`buf`)
+                // and how `next_tok` uses slices of it.
+                // The key is resetting the Tokenizer's *state* so it doesn't try to
+                // continue a token that the higher layers have already considered complete.
+            }
+            _ => {
+                // Not in a mid-scalar state, no reset needed.
+            }
+        }
+    }
+
     /// Return next token *or* `Tok {kind:Eof}` if no progress possible.
     /// `src` is the *entire* current buffer.
     pub fn next_tok(&mut self, src: &str) -> Result<Tok, JsonError> {
@@ -210,6 +233,18 @@ impl Tokenizer {
                             };
                             self.pos += 1; // consume the quote itself
                             self.state = LState::Start; // leave string mode
+                            return Ok(tok);
+                        }
+
+                        /* ───── structural characters that likely end an unclosed string ───── */
+                        if b == b'}' || b == b']' || b == b',' {
+                            // Treat this as the end of an unclosed string
+                            let tok = Tok {
+                                kind: Kind::StrEnd,
+                                start: *start,
+                                end: self.pos,
+                            };
+                            self.state = LState::Start; // leave string mode (don't consume the structural char)
                             return Ok(tok);
                         }
 
