@@ -238,15 +238,38 @@ impl Builder {
     ) -> JsonValue {
         let current_frame_instance = &stack[frame_idx_on_stack];
 
-        // Base case: If this is the last frame on the stack, it's the active scalar
-        // (or an empty, just-opened container).
+        // Base case: If this is the last frame on the stack.
         if frame_idx_on_stack == stack.len() - 1 {
             return match current_frame_instance {
                 Frame::Str { buf } => JsonValue::String(buf.clone()),
                 Frame::Num { buf } => JsonValue::String(buf.clone()), // Partial numbers as string for snapshot
                 Frame::Ident { buf } => JsonValue::String(buf.clone()), // Partial idents as string for snapshot
-                Frame::Obj { .. } => JsonValue::Object(HashMap::new()), // Just opened '{'
-                Frame::Arr { .. } => JsonValue::Array(Vec::new()),      // Just opened '['
+                Frame::Obj {
+                    map: completed_children_map,
+                    last_key: active_child_key_opt,
+                } => {
+                    let mut snapshot_map = HashMap::new();
+                    for (k, v_json) in completed_children_map.iter() {
+                        snapshot_map.insert(k.clone(), v_json.clone());
+                    }
+                    // If this Obj frame is last on stack AND has an active key whose value hasn't started a new frame yet
+                    if let Some(key) = active_child_key_opt {
+                        // Add a placeholder for the active key if its value isn't also on stack.
+                        // This ensures the key appears even if its value is about to stream.
+                        if !snapshot_map.contains_key(key) {
+                            // Avoid overwriting if somehow already there
+                            snapshot_map.insert(key.clone(), JsonValue::String("".to_string()));
+                        }
+                    }
+                    JsonValue::Object(snapshot_map)
+                }
+                Frame::Arr {
+                    vec: completed_children_vec,
+                    ..
+                } => {
+                    // If an Arr frame is last on stack, represent its completed children.
+                    JsonValue::Array(completed_children_vec.clone())
+                }
             };
         }
 
@@ -615,38 +638,39 @@ impl Builder {
 
         // Snapshotting logic:
         // If streaming, and the stack is not empty (meaning there's a root structure),
-        // always emit a snapshot of the root frame's current value.
+        // use the consistent current_root_json_value_snapshot to get the snapshot value.
         if self.streaming && !self.stack.is_empty() {
-            let root_frame_for_snapshot = self.stack.first().unwrap(); // Snapshot the actual root
-            let snap_val = match root_frame_for_snapshot {
-                Frame::Obj { map, .. } => JsonValue::Object(map.clone()),
-                Frame::Arr { vec } => JsonValue::Array(vec.clone()),
-                // If root is somehow a scalar frame after an update, this is unusual.
-                // This case should ideally be handled by how `val` is pushed onto stack if it's a root scalar.
-                // For now, if stack[0] is scalar, this indicates an issue or a very simple JSON (e.g. just "string").
-                // The `json_to_python` coercion handles a root scalar becoming `List[Class(content=scalar)]`.
-                Frame::Str { buf } => JsonValue::String(buf.clone()), // Raw buffer content
-                Frame::Num { buf } => JsonValue::String(buf.clone()), // Raw buffer content (will be parsed later by json_to_python if needed)
-                Frame::Ident { buf } => JsonValue::String(buf.clone()), // Raw buffer content
-            };
-
-            // For these root snapshots, path is empty.
-            let snapshot = Snapshot::Partial {
-                path: Vec::new(), // Path for root snapshot is empty
-                value: snap_val,
-            };
-            // After 'val' is processed and added to its parent, its specific path component should be popped.
-            // This happens regardless of snapshotting the root.
-            // If val was a scalar, its path was pushed by ensure_X_frame or push_path_for_scalar.
-            // If val was a container, finish_container already popped its path.
-            // This logic assumes that if 'val' is not a container, its path needs popping.
-            if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
-                if !self.path.is_empty() {
-                    debug!("[finish_value_and_maybe_snapshot] Popping path for scalar value after root snapshot. Path: {:?}", self.path);
-                    self.path.pop();
+            if let Some(snap_val) = self.current_root_json_value_snapshot() {
+                // For these root snapshots, path is empty.
+                let snapshot = Snapshot::Partial {
+                    path: Vec::new(), // Path for root snapshot is empty
+                    value: snap_val,
+                };
+                // After 'val' is processed and added to its parent, its specific path component should be popped.
+                // This happens regardless of snapshotting the root.
+                // If val was a scalar, its path was pushed by ensure_X_frame or push_path_for_scalar.
+                // If val was a container, finish_container already popped its path.
+                // This logic assumes that if 'val' is not a container, its path needs popping.
+                if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
+                    if !self.path.is_empty() {
+                        debug!("[finish_value_and_maybe_snapshot] Popping path for scalar value after root snapshot. Path: {:?}", self.path);
+                        self.path.pop();
+                    }
                 }
+                return Ok(Some(snapshot));
+            } else {
+                // current_root_json_value_snapshot returned None, but stack wasn't empty.
+                // This is unexpected with the current logic of build_snapshot_from_stack_recursive.
+                // Fallback to returning no snapshot for this event.
+                debug!("[finish_value_and_maybe_snapshot] current_root_json_value_snapshot returned None unexpectedly.");
+                // Path popping for scalar 'val' should still happen if no snapshot is emitted.
+                if !matches!(val, JsonValue::Object(_) | JsonValue::Array(_)) {
+                    if !self.path.is_empty() {
+                        self.path.pop();
+                    }
+                }
+                return Ok(None);
             }
-            return Ok(Some(snapshot));
         } else if !self.streaming && self.stack.is_empty() {
             // Non-streaming, val is the complete root.
             // If val was a scalar, its path was pushed. Pop it.
@@ -682,202 +706,37 @@ impl Builder {
 
         if self.stack.len() != 1 {
             if streaming {
-                /*───────────────── 1. try to patch an object value ─────────────────*/
-                if self.stack.len() >= 2 {
-                    let len = self.stack.len();
-                    let (parent, child) = self.stack.split_at_mut(len - 1);
-                    if let Frame::Obj {
-                        map,
-                        last_key: Some(k),
-                        ..
-                    } = &mut parent[parent.len() - 1]
-                    {
-                        match &child[0] {
-                            Frame::Str { buf } => {
-                                let mut tail = buf.clone();
-                                while matches!(
-                                    tail.chars().last(),
-                                    Some('}' | ',' | ']' | ' ' | '\n' | '\r' | '\t')
-                                ) {
-                                    tail.pop();
-                                }
-                                map.insert(k.clone(), JsonValue::String(tail));
-                            }
-                            Frame::Ident { buf } => {
-                                let mut tail = buf.clone();
-                                while matches!(
-                                    tail.chars().last(),
-                                    Some('}' | ',' | ']' | ' ' | '\n' | '\r' | '\t')
-                                ) {
-                                    tail.pop();
-                                }
-                                map.insert(
-                                    k.clone(),
-                                    parse_ident(&tail).unwrap_or(JsonValue::Null),
-                                );
-                            }
-                            Frame::Num { buf } => {
-                                map.insert(k.clone(), JsonValue::Number(parse_number(buf)?));
-                            }
-                            _ => {}
-                        }
-                    }
+                // If streaming and the stack is not fully resolved,
+                // generate a snapshot using the consistent recursive method.
+                // This ensures that intermediate calls to finish() (e.g. due to NeedMore
+                // in Parser::parse) produce snapshots reflecting the true current partial state.
+                if !self.stack.is_empty() {
+                    debug!(
+                        "[Builder::finish] Streaming, stack not empty, generating snapshot from stack. Stack depth: {}",
+                        self.stack.len()
+                    );
+                    let snapshot_val = Self::build_snapshot_from_stack_recursive(&self.stack, 0);
+                    return Ok(snapshot_val);
+                } else {
+                    // Should not typically happen if finish is called with streaming=true
+                    // and stack.len() != 1, but as a fallback.
+                    debug!("[Builder::finish] Streaming, stack empty, returning Null.");
+                    return Ok(JsonValue::Null);
                 }
-
-                /*───────────────── 2. if root is now non-empty, return it ──────────*/
-                if let Some(val) = match self.stack.first().unwrap() {
-                    Frame::Obj { map, .. } if !map.is_empty() => {
-                        Some(JsonValue::Object(map.clone()))
-                    }
-                    Frame::Arr { vec } if !vec.is_empty() => Some(JsonValue::Array(vec.clone())),
-                    _ => None,
-                } {
-                    return Ok(val);
-                }
-
-                /*───────────────── 3. flush the dangling scalar itself (with modification) ─────────────*/
-                // If stack is [Arr, ScalarFrame] and Arr expects objects, try to wrap scalar.
-                if self.stack.len() == 2 {
-                    if let (Some(Frame::Arr { .. }), Some(scalar_frame_to_finish)) =
-                        (self.stack.first(), self.stack.last())
-                    {
-                        if let Some(expected_item_type) =
-                            self.get_expected_type_for_array_item_in_finish(root_target_type)
-                        {
-                            // Pass root_target_type
-                            if matches!(
-                                expected_item_type.kind,
-                                PyTypeKind::Class | PyTypeKind::Union
-                            ) {
-                                debug!("[Builder::finish] Dangling scalar for expected class/union list item: {:?}. Attempting to wrap.", expected_item_type.name);
-                                let scalar_value = match scalar_frame_to_finish {
-                                    Frame::Str { buf } => JsonValue::String(unescape(buf)?), // unescape here before putting in map
-                                    Frame::Num { buf } => JsonValue::Number(parse_number(buf)?),
-                                    Frame::Ident { buf } => parse_ident(buf)
-                                        .unwrap_or_else(|| JsonValue::String(squash_ws(buf))), // Use squash_ws
-                                    _ => {
-                                        // This case should ideally not be reached if scalar_frame_to_finish is truly a scalar frame
-                                        debug!("[Builder::finish] Dangling frame is not Str, Num, or Ident. Returning Null.");
-                                        return Ok(JsonValue::Null);
-                                    }
-                                };
-
-                                // Heuristic: Use "content" as key if class is Chat, or first field name.
-                                // This is a simplified approach. A more robust solution would involve deeper schema introspection
-                                // or conventions for how to handle raw scalars meant for object fields.
-                                let field_name = if expected_item_type.name == "Chat" {
-                                    // Assuming simple name check for Chat
-                                    "content".to_string()
-                                } else {
-                                    expected_item_type
-                                        .fields
-                                        .keys()
-                                        .next()
-                                        .cloned()
-                                        .unwrap_or_else(|| "unknown_field".to_string())
-                                };
-
-                                let mut obj_map = HashMap::new();
-                                obj_map.insert(field_name, scalar_value);
-
-                                // Add _type_name if we can determine it (simplified)
-                                let type_to_instantiate_name =
-                                    if expected_item_type.kind == PyTypeKind::Union {
-                                        // For a Union, pick the first compatible class arg, or just the first arg's name.
-                                        // This is highly simplified. A real system might need a discriminator or try types.
-                                        expected_item_type
-                                            .args
-                                            .first()
-                                            .map_or(expected_item_type.name.clone(), |arg| {
-                                                arg.name.clone()
-                                            })
-                                    } else {
-                                        // PyTypeKind::Class
-                                        expected_item_type.name.clone()
-                                    };
-                                obj_map.insert(
-                                    "_type_name".to_string(),
-                                    JsonValue::String(type_to_instantiate_name),
-                                );
-
-                                let list_item_obj = JsonValue::Object(obj_map);
-                                debug!(
-                                    "[Builder::finish] Wrapped dangling scalar into: {:?}",
-                                    list_item_obj
-                                );
-                                // Return as an array containing this single object
-                                return Ok(JsonValue::Array(vec![list_item_obj]));
-                            }
-                        }
-                    }
-                }
-
-                // Original fallback: flush the dangling scalar itself if not wrapped above
-                debug!("[Builder::finish] Flushing dangling scalar directly.");
-                return match self.stack.last().unwrap() {
-                    Frame::Str { buf } => {
-                        if streaming {
-                            // Check for common incomplete escape sequences at the end of the buffer
-                            let ends_with_single_backslash =
-                                buf.ends_with('\\') && !buf.ends_with("\\\\");
-                            let ends_with_partial_unicode = if buf.len() >= 2 && buf.ends_with('u')
-                            {
-                                buf.chars().nth(buf.len() - 2) == Some('\\') // ends with \u
-                            } else if buf.len() >= 3
-                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
-                                && buf.chars().nth(buf.len() - 2) == Some('u')
-                            {
-                                buf.chars().nth(buf.len() - 3) == Some('\\') // ends with \uX
-                            } else if buf.len() >= 4
-                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
-                                && buf.chars().nth(buf.len() - 3) == Some('u')
-                                && buf
-                                    .chars()
-                                    .nth(buf.len() - 2)
-                                    .map_or(false, |c| c.is_ascii_hexdigit())
-                            {
-                                buf.chars().nth(buf.len() - 4) == Some('\\') // ends with \uXX
-                            } else if buf.len() >= 5
-                                && buf.ends_with(|c: char| c.is_ascii_hexdigit())
-                                && buf.chars().nth(buf.len() - 4) == Some('u')
-                                && buf
-                                    .chars()
-                                    .nth(buf.len() - 3)
-                                    .map_or(false, |c| c.is_ascii_hexdigit())
-                                && buf
-                                    .chars()
-                                    .nth(buf.len() - 2)
-                                    .map_or(false, |c| c.is_ascii_hexdigit())
-                            {
-                                buf.chars().nth(buf.len() - 5) == Some('\\') // ends with \uXXX
-                            } else {
-                                false
-                            };
-
-                            if ends_with_single_backslash || ends_with_partial_unicode {
-                                debug!("[Builder::finish] Frame::Str ends with partial escape, returning raw: {:?}", buf);
-                                Ok(JsonValue::String(buf.clone()))
-                            } else {
-                                Ok(JsonValue::String(unescape(buf)?))
-                            }
-                        } else {
-                            // Not streaming
-                            Ok(JsonValue::String(unescape(buf)?))
-                        }
-                    }
-                    Frame::Num { buf } => Ok(JsonValue::Number(parse_number(buf)?)),
-                    Frame::Ident { buf } => {
-                        Ok(parse_ident(buf).unwrap_or_else(|| JsonValue::String(squash_ws(buf))))
-                    }
-                    _ => Ok(JsonValue::Null),
-                };
+            } else {
+                /* non-streaming mode: unfinished input is an error */
+                debug!(
+                    "[Builder::finish] Not streaming, stack depth {} != 1, returning UnexpectedEof.",
+                    self.stack.len()
+                );
+                return Err(JsonError::UnexpectedEof);
             }
-
-            /* non-streaming mode: unfinished input is an error */
-            return Err(JsonError::UnexpectedEof);
         }
 
         /*──────────────── standard (finished) EOF, stack length == 1 ─────────────*/
+        // Or non-streaming mode where stack must be 1 for valid completion.
+        // This part handles the finalization of a fully parsed JSON structure
+        // or the result of a non-streaming parse.
         match self.stack.last().unwrap().clone() {
             Frame::Arr { vec } => {
                 if vec.len() == 1 {
