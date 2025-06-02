@@ -678,8 +678,6 @@ pub fn json_to_python(
                 }
             }
 
-            let dict = PyDict::new(py);
-
             // If we have type info for a union, try to determine which type to use
             if let Some(PyTypeInfo {
                 kind: PyTypeKind::Union,
@@ -757,25 +755,7 @@ pub fn json_to_python(
                 }
             }
 
-            // Otherwise (no type_info, or type_info is Dict, Any, or Union/Optional not resolving to a failed Class),
-            // convert to PyDict.
-            debug!("[json_to_python] Converting JsonValue::Object to PyDict (expected type was None, Dict, Any, or Union/Optional not resolving to a failed Class).");
-            for (k, v) in map {
-                let field_type_for_dict_val = if let Some(ti) = type_info {
-                    // Determine value type for Dict[K,V] or Any
-                    if ti.kind == PyTypeKind::Dict && ti.args.len() == 2 {
-                        Some(&ti.args[1])
-                    } else if ti.kind == PyTypeKind::Any {
-                        None
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                dict.set_item(k, json_to_python(py, v, field_type_for_dict_val)?)?;
-            }
-            Ok(dict.into())
+            Ok(py.None())
         }
         JsonValue::Array(arr) => {
             let list = PyList::empty(py);
