@@ -85,7 +85,6 @@ def type_to_format_instructions(type_obj: Any, name: Optional[str] = None) -> st
     # Generate the main format instruction
     tag_name, main_format = format_type_with_examples(type_obj, name)
 
-    print("Structure examples collected:", structure_examples)
 
     # Build the final instructions with structure examples first
     if structure_examples:
@@ -181,8 +180,6 @@ def _is_complex_type(type_obj: Type) -> bool:
     
     # Check if it's a class type
     origin = get_origin(type_obj)
-
-    print(type_obj)
 
     if origin is None:
         if hasattr(type_obj, '__value__'):
