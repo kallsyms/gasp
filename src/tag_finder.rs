@@ -3,7 +3,7 @@
 use crate::xml_types::XmlError as JsonError;
 use log::debug;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TagEvent {
     Open(String),  // <Tag>
     Bytes(String), // payload

@@ -30,7 +30,7 @@ class Response:
         return self.data == other.data and self.status == other.status
 
 
-class Report:
+class Report(gasp.Deserializable):
     title: str
     sections: List[str]
     
@@ -107,11 +107,11 @@ def test_no_ignored_tags():
     """Test parsing with no ignored tags (empty list overrides defaults)"""
     llm_output = """
 <Report>
-    <title type="string">Monthly Report</title>
-    <sections type="list">
-        <section type="string">Introduction</section>
-        <section type="string">Analysis</section>
-        <section type="string">Conclusion</section>
+    <title type="str">Monthly Report</title>
+    <sections type="list[str]">
+        <item>Introduction</item>
+        <item>Analysis</item>
+        <item>Conclusion</item>
     </sections>
 </Report>
 """

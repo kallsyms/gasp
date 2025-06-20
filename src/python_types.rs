@@ -451,8 +451,50 @@ pub fn xml_to_python(
                         debug!("Type is list");
                         let list = PyList::empty(py);
                         let element_type = ti.args.get(0);
-                        for item in children {
-                            list.append(xml_to_python(py, item, element_type)?)?;
+
+                        for child in children {
+                            if let XmlValue::Element(item_name, item_attrs, item_children) = child {
+                                if item_name == "item" && item_children.len() == 1 {
+                                    if let Some(XmlValue::Text(text)) = item_children.get(0) {
+                                        let py_value = if let Some(elem_type) = element_type {
+                                            // Use the typed argument
+                                            xml_to_python(
+                                                py,
+                                                &XmlValue::Text(text.clone()),
+                                                Some(elem_type),
+                                            )?
+                                        } else if let Some(type_attr) = item_attrs.get("type") {
+                                            // Use type attribute if no args specified
+                                            match type_attr.as_str() {
+                                                "int" => {
+                                                    text.parse::<i64>().unwrap_or(0).into_py(py)
+                                                }
+                                                "float" => {
+                                                    text.parse::<f64>().unwrap_or(0.0).into_py(py)
+                                                }
+                                                "bool" | "boolean" => {
+                                                    let val = match text.to_lowercase().as_str() {
+                                                        "true" | "1" | "yes" => true,
+                                                        "false" | "0" | "no" => false,
+                                                        _ => false,
+                                                    };
+                                                    val.into_py(py)
+                                                }
+                                                "str" | "string" => text.into_py(py),
+                                                _ => text.into_py(py), // Default to string
+                                            }
+                                        } else {
+                                            // No type info, default to string
+                                            text.into_py(py)
+                                        };
+
+                                        list.append(py_value)?;
+                                    }
+                                } else {
+                                    // Handle non-text items
+                                    list.append(xml_to_python(py, child, element_type)?)?;
+                                }
+                            }
                         }
                         return Ok(list.into());
                     }
@@ -489,19 +531,74 @@ pub fn xml_to_python(
                         debug!("Type is tuple");
                         let items = PyList::empty(py);
 
+                        // Check if this is a homogeneous tuple (Tuple[int, ...])
+                        let is_homogeneous = ti.args.len() == 2
+                            && ti
+                                .args
+                                .get(1)
+                                .map(|t| t.name == "Ellipsis")
+                                .unwrap_or(false);
+
                         // For typed tuples, match items with their expected types
                         for (i, child) in children.iter().enumerate() {
-                            if let XmlValue::Element(item_name, _, item_children) = child {
-                                if item_name == "item" && item_children.len() == 1 {
-                                    if let Some(XmlValue::Text(text)) = item_children.get(0) {
-                                        // Get the type for this position if available
-                                        let item_type = ti.args.get(i);
-                                        let py_value = xml_to_python(
-                                            py,
-                                            &XmlValue::Text(text.clone()),
-                                            item_type,
-                                        )?;
+                            if let XmlValue::Element(item_name, item_attrs, item_children) = child {
+                                if item_name == "item" {
+                                    // Get the expected type for this position
+                                    let expected_type = if is_homogeneous {
+                                        // For Tuple[int, ...], use first arg for all positions
+                                        ti.args.get(0)
+                                    } else {
+                                        // For fixed tuples, get type for specific position
+                                        ti.args.get(i)
+                                    };
+
+                                    // Check if this is a complex type (has child elements)
+                                    if !item_children.is_empty()
+                                        && item_children
+                                            .iter()
+                                            .any(|c| matches!(c, XmlValue::Element(_, _, _)))
+                                    {
+                                        // Complex type - parse as XML element
+                                        let py_value = xml_to_python(py, child, expected_type)?;
                                         items.append(py_value)?;
+                                    } else if item_children.len() == 1 {
+                                        if let Some(XmlValue::Text(text)) = item_children.get(0) {
+                                            let py_value = if let Some(elem_type) = expected_type {
+                                                // Use the typed argument
+                                                xml_to_python(
+                                                    py,
+                                                    &XmlValue::Text(text.clone()),
+                                                    Some(elem_type),
+                                                )?
+                                            } else if let Some(type_attr) = item_attrs.get("type") {
+                                                // Use type attribute if no args specified
+                                                match type_attr.as_str() {
+                                                    "int" => {
+                                                        text.parse::<i64>().unwrap_or(0).into_py(py)
+                                                    }
+                                                    "float" => text
+                                                        .parse::<f64>()
+                                                        .unwrap_or(0.0)
+                                                        .into_py(py),
+                                                    "bool" | "boolean" => {
+                                                        let val = match text.to_lowercase().as_str()
+                                                        {
+                                                            "true" | "1" | "yes" => true,
+                                                            "false" | "0" | "no" => false,
+                                                            _ => false,
+                                                        };
+                                                        val.into_py(py)
+                                                    }
+                                                    "str" | "string" => text.into_py(py),
+                                                    _ => text.into_py(py), // Default to string
+                                                }
+                                            } else {
+                                                // No type info, default to string
+                                                text.into_py(py)
+                                            };
+
+                                            items.append(py_value)?;
+                                        }
                                     }
                                 }
                             }
@@ -561,8 +658,14 @@ pub fn xml_to_python(
                     PyTypeKind::Integer => return Ok(s.parse::<i64>().unwrap_or(0).into_py(py)),
                     PyTypeKind::Float => return Ok(s.parse::<f64>().unwrap_or(0.0).into_py(py)),
                     PyTypeKind::Boolean => {
-                        return Ok(s.parse::<bool>().unwrap_or(false).into_py(py))
+                        let val = match s.to_lowercase().as_str() {
+                            "true" | "1" | "yes" => true,
+                            "false" | "0" | "no" => false,
+                            _ => false,
+                        };
+                        return Ok(val.into_py(py));
                     }
+                    PyTypeKind::None => return Ok(py.None()),
                     _ => {}
                 }
             }
@@ -697,13 +800,38 @@ pub fn create_instance_from_xml_events(
 
                 // Process each item with its expected type
                 for (i, child) in children.iter().enumerate() {
-                    if let XmlValue::Element(item_name, _, item_children) = child {
+                    if let XmlValue::Element(item_name, item_attrs, item_children) = child {
                         if item_name == "item" && item_children.len() == 1 {
                             if let Some(XmlValue::Text(text)) = item_children.get(0) {
                                 // Get the type for this position if available
-                                let item_type = type_info.args.get(i);
-                                let py_value =
-                                    xml_to_python(py, &XmlValue::Text(text.clone()), item_type)?;
+                                let py_value = if let Some(type_from_args) = type_info.args.get(i) {
+                                    // Use the typed argument
+                                    xml_to_python(
+                                        py,
+                                        &XmlValue::Text(text.clone()),
+                                        Some(type_from_args),
+                                    )?
+                                } else if let Some(type_attr) = item_attrs.get("type") {
+                                    // Use type attribute if no args specified
+                                    match type_attr.as_str() {
+                                        "int" => text.parse::<i64>().unwrap_or(0).into_py(py),
+                                        "float" => text.parse::<f64>().unwrap_or(0.0).into_py(py),
+                                        "bool" | "boolean" => {
+                                            let val = match text.to_lowercase().as_str() {
+                                                "true" | "1" | "yes" => true,
+                                                "false" | "0" | "no" => false,
+                                                _ => false,
+                                            };
+                                            val.into_py(py)
+                                        }
+                                        "str" | "string" => text.into_py(py),
+                                        _ => text.into_py(py), // Default to string
+                                    }
+                                } else {
+                                    // No type info, default to string
+                                    text.into_py(py)
+                                };
+
                                 items.append(py_value)?;
                             }
                         }
@@ -780,6 +908,45 @@ pub fn create_instance_from_xml_events(
                 for child in children {
                     if let XmlValue::Element(item_name, item_attrs, item_children) = child {
                         if item_name == "item" {
+                            // Check if we have a single text child
+                            if item_children.len() == 1 {
+                                if let Some(XmlValue::Text(text)) = item_children.get(0) {
+                                    let py_value = if let Some(elem_type) = element_type {
+                                        // Use the typed argument
+                                        xml_to_python(
+                                            py,
+                                            &XmlValue::Text(text.clone()),
+                                            Some(elem_type),
+                                        )?
+                                    } else if let Some(type_attr) = item_attrs.get("type") {
+                                        // Use type attribute if no args specified
+                                        match type_attr.as_str() {
+                                            "int" => text.parse::<i64>().unwrap_or(0).into_py(py),
+                                            "float" => {
+                                                text.parse::<f64>().unwrap_or(0.0).into_py(py)
+                                            }
+                                            "bool" | "boolean" => {
+                                                let val = match text.to_lowercase().as_str() {
+                                                    "true" | "1" | "yes" => true,
+                                                    "false" | "0" | "no" => false,
+                                                    _ => false,
+                                                };
+                                                val.into_py(py)
+                                            }
+                                            "str" | "string" => text.into_py(py),
+                                            _ => text.into_py(py), // Default to string
+                                        }
+                                    } else {
+                                        // No type info, default to string
+                                        text.into_py(py)
+                                    };
+
+                                    py_list.append(py_value)?;
+                                    continue;
+                                }
+                            }
+
+                            // Handle more complex items
                             // For Union element types, check the type attribute
                             if let Some(elem_type) = element_type {
                                 if elem_type.kind == PyTypeKind::Union {
@@ -834,70 +1001,51 @@ pub fn create_instance_from_xml_events(
                                     }
                                 } else {
                                     // Non-union element type
-                                    if let Some(elem_type) = element_type {
-                                        if elem_type.kind == PyTypeKind::Class {
-                                            // For class types, we need to create an instance
-                                            if let Some(py_type) = &elem_type.py_type {
-                                                let instance = py_type.as_ref(py).call0()?;
+                                    if elem_type.kind == PyTypeKind::Class {
+                                        // For class types, we need to create an instance
+                                        if let Some(py_type) = &elem_type.py_type {
+                                            let instance = py_type.as_ref(py).call0()?;
 
-                                                // Set fields from item children
-                                                for item_child in &item_children {
-                                                    if let XmlValue::Element(
-                                                        field_name,
-                                                        _,
-                                                        field_children,
-                                                    ) = item_child
+                                            // Set fields from item children
+                                            for item_child in &item_children {
+                                                if let XmlValue::Element(
+                                                    field_name,
+                                                    _,
+                                                    field_children,
+                                                ) = item_child
+                                                {
+                                                    if let Some(field_info) =
+                                                        elem_type.fields.get(field_name)
                                                     {
-                                                        if let Some(field_info) =
-                                                            elem_type.fields.get(field_name)
-                                                        {
-                                                            if field_children.len() == 1 {
-                                                                if let Some(XmlValue::Text(text)) =
-                                                                    field_children.get(0)
-                                                                {
-                                                                    let py_value = xml_to_python(
-                                                                        py,
-                                                                        &XmlValue::Text(
-                                                                            text.clone(),
-                                                                        ),
-                                                                        Some(field_info),
-                                                                    )?;
-                                                                    instance.setattr(
-                                                                        field_name.as_str(),
-                                                                        py_value,
-                                                                    )?;
-                                                                }
+                                                        if field_children.len() == 1 {
+                                                            if let Some(XmlValue::Text(text)) =
+                                                                field_children.get(0)
+                                                            {
+                                                                let py_value = xml_to_python(
+                                                                    py,
+                                                                    &XmlValue::Text(text.clone()),
+                                                                    Some(field_info),
+                                                                )?;
+                                                                instance.setattr(
+                                                                    field_name.as_str(),
+                                                                    py_value,
+                                                                )?;
                                                             }
                                                         }
                                                     }
                                                 }
+                                            }
 
-                                                py_list.append(instance)?;
-                                            }
-                                        } else {
-                                            // For non-class types (like str, int, etc.)
-                                            // Extract the text content from the item
-                                            if item_children.len() == 1 {
-                                                if let Some(XmlValue::Text(text)) =
-                                                    item_children.get(0)
-                                                {
-                                                    let py_item = xml_to_python(
-                                                        py,
-                                                        &XmlValue::Text(text.clone()),
-                                                        element_type,
-                                                    )?;
-                                                    py_list.append(py_item)?;
-                                                }
-                                            } else if item_children.is_empty() {
-                                                // Empty item, append empty string or None
-                                                let py_item = xml_to_python(
-                                                    py,
-                                                    &XmlValue::Text("".to_string()),
-                                                    element_type,
-                                                )?;
-                                                py_list.append(py_item)?;
-                                            }
+                                            py_list.append(instance)?;
                                         }
+                                    } else if item_children.is_empty() {
+                                        // Empty item, append empty string or None
+                                        let py_item = xml_to_python(
+                                            py,
+                                            &XmlValue::Text("".to_string()),
+                                            element_type,
+                                        )?;
+                                        py_list.append(py_item)?;
                                     }
                                 }
                             }
