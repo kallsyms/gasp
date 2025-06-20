@@ -36,6 +36,19 @@ pub struct PyTypeInfo {
 }
 
 impl PyTypeInfo {
+    pub fn any() -> Self {
+        Self {
+            kind: PyTypeKind::Any,
+            name: "Any".to_string(),
+            module: Some("typing".to_string()),
+            origin: Some("Any".to_string()),
+            args: Vec::new(),
+            fields: HashMap::new(),
+            is_optional: false,
+            py_type: None,
+        }
+    }
+
     pub fn new(kind: PyTypeKind, name: String) -> Self {
         Self {
             kind,
@@ -77,6 +90,17 @@ impl PyTypeInfo {
     pub fn with_optional(mut self, is_optional: bool) -> Self {
         self.is_optional = is_optional;
         self
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self.kind,
+            PyTypeKind::String
+                | PyTypeKind::Integer
+                | PyTypeKind::Float
+                | PyTypeKind::Boolean
+                | PyTypeKind::None
+        )
     }
 
     /// Check if a XmlValue matches this type

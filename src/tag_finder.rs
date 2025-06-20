@@ -3,9 +3,17 @@
 use crate::xml_types::XmlError as JsonError;
 use log::debug;
 
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct Tag {
+    pub name: String,
+    pub attributes: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum TagEvent {
-    Open(String),  // <Tag>
+    Open(Tag),     // <Tag>
     Bytes(String), // payload
     Close(String), // </Tag>
 }
@@ -128,11 +136,20 @@ impl TagFinder {
             let tag_body = &self.buf[lt + 1..gt]; // without '<' / '>'
             let is_close = tag_body.starts_with('/');
             let name_part = if is_close { &tag_body[1..] } else { tag_body };
-            let name = name_part.split_whitespace().next().unwrap_or("").to_owned(); // Original case name from text
-            let name_lower = name.to_lowercase(); // Lowercase for matching
+            let mut parts = name_part.split_whitespace();
+            let name = parts.next().unwrap_or("").to_owned();
+            let name_lower = name.to_lowercase();
+
+            let mut attributes = HashMap::new();
+            while let Some(part) = parts.next() {
+                if let Some((key, value)) = part.split_once('=') {
+                    attributes.insert(key.to_string(), value.trim_matches('"').to_string());
+                }
+            }
+
             debug!(
-                "[TagFinder::push] Tag analysis: body='{}', is_close={}, name='{}', name_lower='{}'",
-                tag_body, is_close, name, name_lower
+                "[TagFinder::push] Tag analysis: body='{}', is_close={}, name='{}', name_lower='{}', attributes='{:?}'",
+                tag_body, is_close, name, name_lower, attributes
             );
 
             // Check if this tag is ignored (use lowercase for comparison)
@@ -153,23 +170,8 @@ impl TagFinder {
                 name, name_lower, is_wanted, self.wanted
             );
 
-            // If we're inside a wanted tag and not in an ignored section,
-            // emit the entire tag as content (for nested tags that are not themselves wanted/ignored)
-            if self.inside && !self.inside_ignored && !is_wanted && !is_ignored {
-                // is_wanted and is_ignored are now based on name_lower
-                let tag_content = self.buf[lt..=gt].to_owned();
-                debug!(
-                    "[TagFinder::push] Nested tag detected: '{}'. Emitting as Bytes.",
-                    tag_content
-                );
-                emit(TagEvent::Bytes(tag_content))?;
-                self.buf.drain(..gt + 1);
-                debug!(
-                    "[TagFinder::push] Drained nested tag. Remaining buf: '{}'",
-                    self.buf
-                );
-                continue;
-            }
+            // Don't skip nested tags - we need to emit them as proper tag events
+            // so the parser can handle object fields properly
 
             if !is_close {
                 /* <Tag> : opening tag */
@@ -180,7 +182,10 @@ impl TagFinder {
                     debug!("[TagFinder::push] Opened ignored tag '{}'. inside_ignored={}, ignored_depth={}", name, self.inside_ignored, self.ignored_depth);
                 } else if is_wanted && !self.inside_ignored {
                     debug!("[TagFinder::push] Emitting Open for wanted tag: '{}'", name);
-                    emit(TagEvent::Open(name.clone()))?;
+                    emit(TagEvent::Open(Tag {
+                        name: name.clone(),
+                        attributes,
+                    }))?;
                     if !self.inside {
                         self.inside = true;
                         debug!(
@@ -193,6 +198,16 @@ impl TagFinder {
                             name
                         );
                     }
+                } else if self.inside && !self.inside_ignored && !is_ignored {
+                    // Emit nested tags inside wanted tags as proper tag events
+                    debug!(
+                        "[TagFinder::push] Emitting Open for nested tag inside wanted tag: '{}'",
+                        name
+                    );
+                    emit(TagEvent::Open(Tag {
+                        name: name.clone(),
+                        attributes,
+                    }))?;
                 } else {
                     debug!("[TagFinder::push] Open Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
                 }
@@ -216,6 +231,13 @@ impl TagFinder {
                         "[TagFinder::push] Set self.inside = false for tag '{}'",
                         name
                     );
+                } else if self.inside && !self.inside_ignored && !is_ignored {
+                    // Emit nested tags inside wanted tags as proper tag events
+                    debug!(
+                        "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
+                        name
+                    );
+                    emit(TagEvent::Close(name.clone()))?;
                 } else {
                     debug!("[TagFinder::push] Close Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
                 }

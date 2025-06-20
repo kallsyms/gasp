@@ -10,7 +10,7 @@ import gasp
 from typing import List, Dict
 
 
-class Result:
+class Result(gasp.Deserializable):
     answer: str
     confidence: float
     
@@ -20,7 +20,7 @@ class Result:
         return self.answer == other.answer and self.confidence == other.confidence
 
 
-class Response:
+class Response(gasp.Deserializable):
     data: str
     status: str
     
@@ -40,7 +40,7 @@ class Report(gasp.Deserializable):
         return self.title == other.title and self.sections == other.sections
 
 
-class Answer:
+class Answer(gasp.Deserializable):
     value: str
     unit: str
     
