@@ -19,10 +19,8 @@ The capital of France is Paris.
 </think>
 
 <Result>
-{
-    "answer": "The capital of France is Paris",
-    "confidence": 0.95
-}
+<answer type="string">The capital of France is Paris</answer>
+<confidence type="float">0.95</confidence>
 </Result>
 
 <thinking>
@@ -48,17 +46,13 @@ print("=== Example 2: Custom Ignored Tags ===")
 
 llm_output2 = """
 <Response>
-{
-    "data": "Important data",
-    "status": "success"
-}
+    <data type="string">Important data</data>
+    <status type="string">success</status>
 </Response>
 
 <DebugInfo>
-{
-    "processing_time": 0.5,
-    "memory_used": "100MB"
-}
+    <processing_time type="float">0.5</processing_time>
+    <memory_used type="string">100MB</memory_used>
 </DebugInfo>
 """
 
@@ -79,10 +73,12 @@ print("=== Example 3: No Ignored Tags ===")
 
 llm_output3 = """
 <Report>
-{
-    "title": "Monthly Report",
-    "sections": ["Introduction", "Analysis", "Conclusion"]
-}
+    <title type="string">Monthly Report</title>
+    <sections type="list">
+        <section type="string">Introduction</section>
+        <section type="string">Analysis</section>
+        <section type="string">Conclusion</section>
+    </sections>
 </Report>
 """
 
@@ -105,9 +101,8 @@ print("=== Example 4: Streaming with Ignored Tags ===")
 chunks = [
     "<system>Processing request...</system>",
     "<Answer>",
-    '{"value": ',
-    '"42",',
-    ' "unit": "degrees"}',
+    '<value type="string">42</value>',
+    '<unit type="string">degrees</unit>',
     "</Answer>",
     "<think>That was easy!</think>"
 ]

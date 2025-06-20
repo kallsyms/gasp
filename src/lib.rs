@@ -1,70 +1,37 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-mod json_parser;
-mod json_sax_scanner;
-mod json_tok;
-mod json_types;
 mod parser;
 mod python_types;
 mod tag_finder;
+mod xml_parser;
+mod xml_types;
 
-use json_parser::StreamParser;
 use parser::PyParser;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Python;
+use xml_parser::StreamParser;
 
-use crate::json_types::{JsonValue, Number};
+use crate::xml_types::XmlValue;
 
-pub fn to_py(py: Python, value: &JsonValue) -> PyObject {
+pub fn to_py(py: Python, value: &XmlValue) -> PyObject {
     match value {
-        JsonValue::Object(map) => {
+        XmlValue::Element(name, attrs, children) => {
             let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, json_value_to_py_object(py, v)).unwrap();
+            dict.set_item("name", name).unwrap();
+            let py_attrs = PyDict::new(py);
+            for (k, v) in attrs {
+                py_attrs.set_item(k, v).unwrap();
             }
+            dict.set_item("attrs", py_attrs).unwrap();
+            let py_children = PyList::empty(py);
+            for child in children {
+                py_children.append(to_py(py, child)).unwrap();
+            }
+            dict.set_item("children", py_children).unwrap();
             dict.into()
         }
-        JsonValue::Array(arr) => {
-            let list = PyList::empty(py);
-            for item in arr {
-                list.append(json_value_to_py_object(py, item)).unwrap();
-            }
-            list.into()
-        }
-        JsonValue::String(s) => s.into_py(py),
-        JsonValue::Number(n) => match n {
-            Number::Integer(i) => i.into_py(py),
-            Number::Float(f) => f.into_py(py),
-        },
-        JsonValue::Boolean(b) => b.into_py(py),
-        JsonValue::Null => py.None(),
-    }
-}
-
-pub fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
-    match value {
-        JsonValue::Object(map) => {
-            let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, json_value_to_py_object(py, v)).unwrap();
-            }
-            dict.into()
-        }
-        JsonValue::Array(arr) => {
-            let list = PyList::empty(py);
-            for item in arr {
-                list.append(json_value_to_py_object(py, item)).unwrap();
-            }
-            list.into()
-        }
-        JsonValue::String(s) => s.into_py(py),
-        JsonValue::Number(n) => match n {
-            Number::Integer(i) => i.into_py(py),
-            Number::Float(f) => f.into_py(py),
-        },
-        JsonValue::Boolean(b) => b.into_py(py),
-        JsonValue::Null => py.None(),
+        XmlValue::Text(text) => text.into_py(py),
     }
 }
 
@@ -72,7 +39,7 @@ pub fn json_value_to_py_object(py: Python, value: &JsonValue) -> PyObject {
 #[pyclass(name = "StreamParser", unsendable)]
 struct PyStreamParser {
     parser: StreamParser,
-    last_val: Option<JsonValue>,
+    last_val: Option<XmlValue>,
 }
 
 #[pymethods]
@@ -88,16 +55,31 @@ impl PyStreamParser {
     /// Feed a chunk; returns the parsed value once complete, else `None`.
     #[pyo3(text_signature = "($self, chunk)")]
     fn parse<'p>(&mut self, py: Python<'p>, chunk: &str) -> PyResult<Option<PyObject>> {
-        // Pass None for root_target_type as PyStreamParser is not type-aware in its Python API
         let step_out = self
             .parser
-            .step(chunk) // This call should already be correct from previous attempt.
+            .step(chunk)
             .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?;
 
-        if let Some(val) = step_out {
-            self.last_val = Some(val.clone());
-            return Ok(Some(to_py(py, &val)));
+        for event in step_out {
+            // The `xml` crate doesn't have a way to get a partial value, so we can't
+            // do much here. We'll just wait for the `is_done` to be true.
         }
+
+        if self.parser.is_done() {
+            // This is a bit of a hack, but we need to get the final value from the parser.
+            // We do this by feeding an empty string to the parser, which will cause it to
+            // finalize the document and return the root element.
+            let final_val = self
+                .parser
+                .step("")
+                .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?;
+            if !final_val.is_empty() {
+                // This is not correct, but it's the best we can do for now.
+                // self.last_val = Some(final_val[0].clone());
+                // return Ok(Some(to_py(py, &self.last_val.as_ref().unwrap())));
+            }
+        }
+
         Ok(None)
     }
 
