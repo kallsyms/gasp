@@ -36,10 +36,23 @@ impl StreamParser {
 
     pub fn step(&mut self, chunk: &str) -> Result<Vec<Event>, XmlError> {
         self.parser.feed_str(chunk);
-        self.parser
+        let events: Result<Vec<Event>, XmlError> = self
+            .parser
             .by_ref()
             .map(|e| e.map_err(|e| XmlError::ParserError(e.to_string())))
-            .collect()
+            .collect();
+
+        // Check if we've received an EndDocument event
+        if let Ok(ref evts) = events {
+            for evt in evts {
+                if matches!(evt, Event::EndDocument) {
+                    self.done = true;
+                    break;
+                }
+            }
+        }
+
+        events
     }
 }
 
