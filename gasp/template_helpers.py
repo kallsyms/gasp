@@ -8,99 +8,197 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union, get_type_hints
 
 def type_to_format_instructions(type_obj: Any, name: Optional[str] = None) -> str:
     """
-    Generate format instructions for a Python type.
+    Generate XML format instructions for a Python type.
     
     Args:
         type_obj: The Python type to generate instructions for
         name: Optional name to use for the type tag (defaults to class name)
         
     Returns:
-        A string containing format instructions
+        A string containing XML format instructions
     """
-    # Track complex types that need structure examples
-    structure_examples = {}
-    
-    # Main formatting function
-    def format_type_with_examples(type_obj: Type, name: Optional[str] = None) -> Tuple[str, str]:
-        # Check origin first to handle type aliases properly
-        origin = get_origin(type_obj)
-        
-        # Special handling for type aliases (created with 'type' statement)
-        # These don't have get_origin() returning Union, but have __value__ attribute
-        if hasattr(type_obj, '__value__'):
-            # This is a type alias, use the actual type
-            actual_type = type_obj.__value__
-            
-            # Check if it's a types.UnionType (Python 3.12 X = Y | Z syntax)
-            if type(actual_type).__name__ == 'UnionType':
-                # Use the type alias name if no explicit name provided
-                if not name and hasattr(type_obj, '__name__'):
-                    tag_name = type_obj.__name__
-                else:
-                    tag_name = name or "Object"
-                # Format as union using __args__
-                return tag_name, _format_union_type_from_args(actual_type.__args__, tag_name, structure_examples)
-            
-            origin = get_origin(actual_type)
-            # Use the type alias name if no explicit name provided
-            if not name and hasattr(type_obj, '__name__'):
-                tag_name = type_obj.__name__
-            else:
-                tag_name = name or "Object"
-        else:
-            # Determine tag name based on type
-            if name:
-                tag_name = name
-            else:
-                # For other types, try to get __name__ attribute
-                tag_name = getattr(type_obj, "__name__", "Object")
-        
-        # Handle Union types
-        if origin is Union or origin is typing.Union:
-            # If we detected a union through type alias, use the actual type
-            if hasattr(type_obj, '__value__'):
-                return tag_name, _format_union_type(type_obj.__value__, tag_name, structure_examples)
-            else:
-                return tag_name, _format_union_type(type_obj, tag_name, structure_examples)
-        
-        # Handle List types
-        if origin is list or origin is typing.List:
-            return tag_name, _format_list_type(type_obj, tag_name, structure_examples)
-        
-        # Handle Dict types
-        if origin is dict or origin is typing.Dict:
-            return tag_name, _format_dict_type(type_obj, tag_name, structure_examples)
-        
-        # Handle primitive types
-        if type_obj is str:
-            return tag_name, f"<{tag_name}>\"your string value\"</{tag_name}>"
-        if type_obj is int or type_obj is float:
-            return tag_name, f"<{tag_name}>42</{tag_name}>"
-        if type_obj is bool:
-            return tag_name, f"<{tag_name}>true</{tag_name}>"
-        
-        # Handle classes (objects with fields)
-        return tag_name, _format_class_type(type_obj, tag_name, structure_examples)
-    
-    # Generate the main format instruction
-    tag_name, main_format = format_type_with_examples(type_obj, name)
-
-
-    # Build the final instructions with structure examples first
-    if structure_examples:
-        examples_text = []
-        for type_name, type_structure in structure_examples.items():
-            examples_text.append(f"Each {type_name} object should have this structure:\n{type_structure}")
-
-        instructions = f"Here are some examples of the expected structure for different types when they are mentioned in the return type:\n\n"
-        instructions += "\n\n".join(examples_text)
-        instructions += "\nYour response should be formatted as:\n\n" + main_format
-        instructions += f"\nIMPORTANT: You MUST wrap your json response in the EXACT tags <{tag_name}> and </{tag_name}>. Do NOT use ```json code blocks. The tags are required for proper parsing."
+    # Determine tag name
+    if name:
+        tag_name = name
     else:
-        instructions = "\nYour response should be formatted as:\n\n" + main_format
-        instructions += f"\nIMPORTANT: You MUST wrap your json response in the EXACT tags <{tag_name}> and </{tag_name}>. Do NOT use ```json code blocks. The tags are required for proper parsing."
+        tag_name = getattr(type_obj, "__name__", "Object")
     
-    return instructions
+    # Check origin for generic types
+    origin = get_origin(type_obj)
+    
+    # Handle Union types
+    if origin is Union or origin is typing.Union:
+        args = get_args(type_obj)
+        # Handle Optional types specially
+        if type(None) in args and len(args) == 2:
+            non_none_type = next(arg for arg in args if arg is not type(None))
+            inner_format = _format_xml_type(non_none_type)
+            return f"<{tag_name}>\n{inner_format}\n</{tag_name}> (optional)"
+        else:
+            # For unions, show alternatives
+            options = []
+            for i, arg in enumerate(args):
+                if arg is not type(None):
+                    options.append(f"    Option {i+1}: {_format_xml_type(arg)}")
+            return f"<{tag_name}>\n" + "\n".join(options) + f"\n</{tag_name}>"
+    
+    # Handle List types
+    if origin is list or origin is typing.List:
+        args = get_args(type_obj)
+        if args:
+            item_type = args[0]
+            item_format = _format_xml_type(item_type)
+            return f"<{tag_name} type=\"list\">\n    <item>{item_format}</item>\n    <item>{item_format}</item>\n    ...\n</{tag_name}>"
+        else:
+            return f"<{tag_name} type=\"list\">\n    <item>...</item>\n</{tag_name}>"
+    
+    # Handle Dict types
+    if origin is dict or origin is typing.Dict:
+        return f"<{tag_name} type=\"dict\">\n    <item key=\"key1\">value1</item>\n    <item key=\"key2\">value2</item>\n    ...\n</{tag_name}>"
+    
+    # Handle primitive types
+    if type_obj is str:
+        return f"<{tag_name} type=\"str\">string value</{tag_name}>"
+    if type_obj is int:
+        return f"<{tag_name} type=\"int\">42</{tag_name}>"
+    if type_obj is float:
+        return f"<{tag_name} type=\"float\">3.14</{tag_name}>"
+    if type_obj is bool:
+        return f"<{tag_name} type=\"bool\">true</{tag_name}>"
+    
+    # Handle classes (objects with fields)
+    try:
+        hints = get_type_hints(type_obj)
+        if hints:
+            fields = []
+            for field_name, field_type in hints.items():
+                if not field_name.startswith('_'):
+                    field_format = _format_xml_field(field_name, field_type)
+                    fields.append(f"    {field_format}")
+            
+            fields_str = "\n".join(fields)
+            return f"<{tag_name}>\n{fields_str}\n</{tag_name}>"
+        else:
+            # Empty class
+            return f"<{tag_name}>\n</{tag_name}>"
+    except (TypeError, AttributeError):
+        # If we can't get type hints, return basic format
+        return f"<{tag_name}>...</{tag_name}>"
+
+def _format_xml_type(type_obj: Type) -> str:
+    """Format a type for XML without the outer tags."""
+    origin = get_origin(type_obj)
+    
+    # Handle primitive types
+    if type_obj is str:
+        return "string value"
+    if type_obj is int:
+        return "42"
+    if type_obj is float:
+        return "3.14"
+    if type_obj is bool:
+        return "true"
+    
+    # Handle List types
+    if origin is list or origin is typing.List:
+        args = get_args(type_obj)
+        if args:
+            item_type = args[0]
+            return f"[{_get_type_name(item_type)} items]"
+        else:
+            return "[items]"
+    
+    # Handle Dict types
+    if origin is dict or origin is typing.Dict:
+        return "{key: value pairs}"
+    
+    # Handle Union types
+    if origin is Union or origin is typing.Union:
+        args = get_args(type_obj)
+        types = [_get_type_name(arg) for arg in args if arg is not type(None)]
+        return " or ".join(types)
+    
+    # Default to type name
+    return getattr(type_obj, "__name__", "object")
+
+def _format_xml_field(field_name: str, field_type: Type) -> str:
+    """Format a single field for XML."""
+    origin = get_origin(field_type)
+    
+    # Get the type attribute string
+    type_attr = _get_xml_type_attr(field_type)
+    
+    # Handle Optional fields
+    if origin is Union or origin is typing.Union:
+        args = get_args(field_type)
+        if type(None) in args and len(args) == 2:
+            non_none_type = next(arg for arg in args if arg is not type(None))
+            type_attr = _get_xml_type_attr(non_none_type)
+            return f"<{field_name} type=\"{type_attr}\">...</{field_name}> (optional)"
+    
+    # Handle List types
+    if origin is list or origin is typing.List:
+        args = get_args(field_type)
+        if args:
+            item_type = args[0]
+            item_type_name = _get_type_name(item_type)
+            return f"<{field_name} type=\"list[{item_type_name}]\">\n        <item>{_format_xml_type(item_type)}</item>\n        ...\n    </{field_name}>"
+        else:
+            return f"<{field_name} type=\"list\">\n        <item>...</item>\n    </{field_name}>"
+    
+    # Default format
+    return f"<{field_name} type=\"{type_attr}\">{_format_xml_type(field_type)}</{field_name}>"
+
+def _get_xml_type_attr(type_obj: Type) -> str:
+    """Get the type attribute value for XML."""
+    origin = get_origin(type_obj)
+    
+    # Handle primitive types
+    if type_obj is str:
+        return "str"
+    if type_obj is int:
+        return "int"
+    if type_obj is float:
+        return "float"
+    if type_obj is bool:
+        return "bool"
+    
+    # Handle List types
+    if origin is list or origin is typing.List:
+        args = get_args(type_obj)
+        if args:
+            item_type = args[0]
+            return f"list[{_get_type_name(item_type)}]"
+        else:
+            return "list"
+    
+    # Handle Dict types
+    if origin is dict or origin is typing.Dict:
+        return "dict"
+    
+    # Handle Union types
+    if origin is Union or origin is typing.Union:
+        args = get_args(type_obj)
+        types = [_get_type_name(arg) for arg in args if arg is not type(None)]
+        return " | ".join(types)
+    
+    # Default to type name
+    return _get_type_name(type_obj)
+
+def _get_type_name(type_obj: Type) -> str:
+    """Get a simple name for a type."""
+    if type_obj is str:
+        return "str"
+    if type_obj is int:
+        return "int"
+    if type_obj is float:
+        return "float"
+    if type_obj is bool:
+        return "bool"
+    if type_obj is type(None):
+        return "None"
+    
+    return getattr(type_obj, "__name__", "object")
 
 def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for a class type."""

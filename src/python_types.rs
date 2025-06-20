@@ -558,9 +558,78 @@ pub fn xml_to_python(
                                             .iter()
                                             .any(|c| matches!(c, XmlValue::Element(_, _, _)))
                                     {
-                                        // Complex type - parse as XML element
-                                        let py_value = xml_to_python(py, child, expected_type)?;
-                                        items.append(py_value)?;
+                                        // Complex type - need to handle differently based on expected type
+                                        if let Some(expected) = expected_type {
+                                            if expected.kind == PyTypeKind::Class {
+                                                // Create instance of the class
+                                                if let Some(py_type) = &expected.py_type {
+                                                    // Check if the type has __gasp_from_partial__ method
+                                                    let instance = if py_type
+                                                        .as_ref(py)
+                                                        .hasattr("__gasp_from_partial__")?
+                                                    {
+                                                        let empty_dict =
+                                                            pyo3::types::PyDict::new(py);
+                                                        py_type.as_ref(py).call_method1(
+                                                            "__gasp_from_partial__",
+                                                            (empty_dict,),
+                                                        )?
+                                                    } else {
+                                                        py_type.as_ref(py).call0()?
+                                                    };
+
+                                                    // Set fields from item children
+                                                    for field_child in item_children {
+                                                        if let XmlValue::Element(
+                                                            field_name,
+                                                            _,
+                                                            field_children,
+                                                        ) = field_child
+                                                        {
+                                                            if let Some(field_info) =
+                                                                expected.fields.get(field_name)
+                                                            {
+                                                                if field_children.len() == 1 {
+                                                                    if let Some(XmlValue::Text(
+                                                                        text,
+                                                                    )) = field_children.get(0)
+                                                                    {
+                                                                        let py_value =
+                                                                            xml_to_python(
+                                                                                py,
+                                                                                &XmlValue::Text(
+                                                                                    text.clone(),
+                                                                                ),
+                                                                                Some(field_info),
+                                                                            )?;
+                                                                        instance.setattr(
+                                                                            field_name.as_str(),
+                                                                            py_value,
+                                                                        )?;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    items.append(instance)?;
+                                                } else {
+                                                    // Fallback to generic parsing
+                                                    let py_value =
+                                                        xml_to_python(py, child, expected_type)?;
+                                                    items.append(py_value)?;
+                                                }
+                                            } else {
+                                                // Non-class complex type
+                                                let py_value =
+                                                    xml_to_python(py, child, expected_type)?;
+                                                items.append(py_value)?;
+                                            }
+                                        } else {
+                                            // No expected type
+                                            let py_value = xml_to_python(py, child, None)?;
+                                            items.append(py_value)?;
+                                        }
                                     } else if item_children.len() == 1 {
                                         if let Some(XmlValue::Text(text)) = item_children.get(0) {
                                             let py_value = if let Some(elem_type) = expected_type {
@@ -633,6 +702,125 @@ pub fn xml_to_python(
                         }
                         return Ok(py_set.into());
                     }
+                    PyTypeKind::Optional => {
+                        debug!("Type is optional in xml_to_python");
+                        // For Optional types, use the inner type
+                        if let Some(inner_type) = ti.args.get(0) {
+                            debug!("Optional inner type: {:?}", inner_type.name);
+                            return xml_to_python(py, value, Some(inner_type));
+                        } else {
+                            // No inner type specified, treat as any
+                            return xml_to_python(py, value, None);
+                        }
+                    }
+                    PyTypeKind::Union => {
+                        debug!("Type is union in xml_to_python");
+                        // Check for type attribute to determine which union member to use
+                        if let Some(type_attr) = attrs.get("type") {
+                            debug!("Union has type attribute: {}", type_attr);
+
+                            // Find the matching union member
+                            for arg in &ti.args {
+                                if &arg.name == type_attr {
+                                    debug!("Found matching union member: {}", arg.name);
+
+                                    // Create instance of this specific type
+                                    if let Some(py_type) = &arg.py_type {
+                                        // Check if the type has __gasp_from_partial__ method
+                                        let instance = if py_type
+                                            .as_ref(py)
+                                            .hasattr("__gasp_from_partial__")?
+                                        {
+                                            let empty_dict = pyo3::types::PyDict::new(py);
+                                            py_type.as_ref(py).call_method1(
+                                                "__gasp_from_partial__",
+                                                (empty_dict,),
+                                            )?
+                                        } else {
+                                            py_type.as_ref(py).call0()?
+                                        };
+
+                                        // Set fields from children
+                                        for child in children {
+                                            if let XmlValue::Element(
+                                                field_name,
+                                                _,
+                                                field_children,
+                                            ) = child
+                                            {
+                                                if let Some(field_info) = arg.fields.get(field_name)
+                                                {
+                                                    if field_children.len() == 1 {
+                                                        if let Some(XmlValue::Text(text)) =
+                                                            field_children.get(0)
+                                                        {
+                                                            let py_value = xml_to_python(
+                                                                py,
+                                                                &XmlValue::Text(text.clone()),
+                                                                Some(field_info),
+                                                            )?;
+                                                            instance.setattr(
+                                                                field_name.as_str(),
+                                                                py_value,
+                                                            )?;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        return Ok(instance.into());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback: try tag name discrimination
+                        for arg in &ti.args {
+                            if &arg.name == name {
+                                debug!("Matched union member by tag name: {}", arg.name);
+                                if let Some(py_type) = &arg.py_type {
+                                    // Check if the type has __gasp_from_partial__ method
+                                    let instance =
+                                        if py_type.as_ref(py).hasattr("__gasp_from_partial__")? {
+                                            let empty_dict = pyo3::types::PyDict::new(py);
+                                            py_type.as_ref(py).call_method1(
+                                                "__gasp_from_partial__",
+                                                (empty_dict,),
+                                            )?
+                                        } else {
+                                            py_type.as_ref(py).call0()?
+                                        };
+                                    for child in children {
+                                        if let XmlValue::Element(field_name, _, field_children) =
+                                            child
+                                        {
+                                            if let Some(field_info) =
+                                                arg.fields.get(field_name.as_str())
+                                            {
+                                                if field_children.len() == 1 {
+                                                    if let Some(XmlValue::Text(text)) =
+                                                        field_children.get(0)
+                                                    {
+                                                        let py_value = xml_to_python(
+                                                            py,
+                                                            &XmlValue::Text(text.clone()),
+                                                            Some(field_info),
+                                                        )?;
+                                                        instance.setattr(
+                                                            field_name.as_str(),
+                                                            py_value,
+                                                        )?;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return Ok(instance.into());
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -687,7 +875,15 @@ pub fn create_instance_from_xml(
         "Creating instance of type: {}",
         py_type.getattr("__name__")?.to_string()
     );
-    let instance = py_type.call0()?;
+    // Check if the type has __gasp_from_partial__ method (Deserializable classes)
+    let instance = if py_type.hasattr("__gasp_from_partial__")? {
+        // Use __gasp_from_partial__ to create instance with proper initialization
+        let empty_dict = pyo3::types::PyDict::new(py);
+        py_type.call_method1("__gasp_from_partial__", (empty_dict,))?
+    } else {
+        // Fall back to regular instantiation for Pydantic and other classes
+        py_type.call0()?
+    };
     for (k, v) in attrs {
         if let Some(field_info) = fields.get(k) {
             debug!("Found field '{}' in attributes", k);
@@ -703,22 +899,153 @@ pub fn create_instance_from_xml(
             if let Some(field_info) = fields.get(child_name) {
                 debug!("Found field '{}' in children", child_name);
                 if field_info.kind == PyTypeKind::List {
-                    let list = PyList::empty(py);
-                    for grand_child in grand_children {
-                        if let XmlValue::Element(_, _, text_children) = grand_child {
-                            if text_children.len() == 1 {
-                                if let Some(XmlValue::Text(text)) = text_children.get(0) {
-                                    let py_value = xml_to_python(
-                                        py,
-                                        &XmlValue::Text(text.clone()),
-                                        field_info.args.get(0),
-                                    )?;
-                                    list.append(py_value)?;
+                    // Use xml_to_python which has proper list handling
+                    let py_value = xml_to_python(py, child, Some(field_info))?;
+                    instance.setattr(child_name.as_str(), py_value)?;
+                } else if field_info.kind == PyTypeKind::Optional {
+                    // Handle Optional fields - check the inner type
+                    debug!("Field '{}' is Optional type", child_name);
+                    if let Some(inner_type) = field_info.args.get(0) {
+                        debug!("Optional inner type: {:?}", inner_type.name);
+
+                        // Special handling for Optional[List[...]]
+                        if inner_type.kind == PyTypeKind::List {
+                            // For lists, we need to parse the children as list items
+                            let py_list = PyList::empty(py);
+                            let element_type = inner_type.args.get(0);
+
+                            for grand_child in grand_children {
+                                if let XmlValue::Element(item_name, item_attrs, item_children) =
+                                    grand_child
+                                {
+                                    if item_name == "item" && item_children.len() == 1 {
+                                        if let Some(XmlValue::Text(text)) = item_children.get(0) {
+                                            let py_value = xml_to_python(
+                                                py,
+                                                &XmlValue::Text(text.clone()),
+                                                element_type,
+                                            )?;
+                                            py_list.append(py_value)?;
+                                        }
+                                    }
+                                }
+                            }
+
+                            instance.setattr(child_name.as_str(), py_list)?;
+                        } else {
+                            // For other Optional types, parse normally
+                            let py_value = xml_to_python(py, child, Some(inner_type))?;
+                            instance.setattr(child_name.as_str(), py_value)?;
+                        }
+                    } else {
+                        // Fallback to generic parsing
+                        let py_value = xml_to_python(py, child, Some(field_info))?;
+                        instance.setattr(child_name.as_str(), py_value)?;
+                    }
+                } else if field_info.kind == PyTypeKind::Union {
+                    // Handle Union fields
+                    debug!("Field '{}' is a Union type", child_name);
+                    debug!("Union has {} args", field_info.args.len());
+                    for (i, arg) in field_info.args.iter().enumerate() {
+                        debug!("  Union arg[{}]: name={}, kind={:?}", i, arg.name, arg.kind);
+                    }
+
+                    println!(
+                        "DEBUG: Processing Union field '{}' with attrs: {:?}",
+                        child_name, child_attrs
+                    );
+                    println!("DEBUG: Grand children: {:?}", grand_children);
+
+                    // Check for type attribute to determine which union member to use
+                    if let Some(type_attr) = child_attrs.get("type") {
+                        debug!("Union field has type attribute: {}", type_attr);
+
+                        // Find the matching union member
+                        let mut found_match = false;
+                        for arg in &field_info.args {
+                            debug!(
+                                "Checking union member: {} against type_attr: {}",
+                                arg.name, type_attr
+                            );
+                            if &arg.name == type_attr {
+                                debug!("Found matching union member: {}", arg.name);
+
+                                // Create instance of this specific type
+                                if let Some(py_type) = &arg.py_type {
+                                    debug!("Creating instance of {}", arg.name);
+                                    // Check if the type has __gasp_from_partial__ method
+                                    let union_instance =
+                                        if py_type.as_ref(py).hasattr("__gasp_from_partial__")? {
+                                            let empty_dict = pyo3::types::PyDict::new(py);
+                                            py_type.as_ref(py).call_method1(
+                                                "__gasp_from_partial__",
+                                                (empty_dict,),
+                                            )?
+                                        } else {
+                                            py_type.as_ref(py).call0()?
+                                        };
+
+                                    // Set fields from grand_children
+                                    debug!(
+                                        "Setting fields from {} grand_children",
+                                        grand_children.len()
+                                    );
+                                    for grand_child in grand_children {
+                                        if let XmlValue::Element(field_name, _, field_children) =
+                                            grand_child
+                                        {
+                                            debug!("Processing field: {}", field_name);
+                                            if let Some(field_type_info) =
+                                                arg.fields.get(field_name.as_str())
+                                            {
+                                                debug!("Found field type info for {}", field_name);
+                                                if field_children.len() == 1 {
+                                                    if let Some(XmlValue::Text(text)) =
+                                                        field_children.get(0)
+                                                    {
+                                                        let py_value = xml_to_python(
+                                                            py,
+                                                            &XmlValue::Text(text.clone()),
+                                                            Some(field_type_info),
+                                                        )?;
+                                                        union_instance.setattr(
+                                                            field_name.as_str(),
+                                                            py_value,
+                                                        )?;
+                                                        debug!("Set field {} to value", field_name);
+                                                    }
+                                                }
+                                            } else {
+                                                debug!("No field type info for {}", field_name);
+                                            }
+                                        }
+                                    }
+
+                                    instance.setattr(child_name.as_str(), union_instance)?;
+                                    debug!("Set union field {} on parent instance", child_name);
+                                    found_match = true;
+                                    break;
+                                } else {
+                                    debug!("No py_type for union member {}", arg.name);
                                 }
                             }
                         }
+
+                        if !found_match {
+                            debug!(
+                                "No matching union member found for type_attr: {}",
+                                type_attr
+                            );
+                            // Fall back to generic parsing
+                            let py_value = xml_to_python(py, child, Some(field_info))?;
+                            instance.setattr(child_name.as_str(), py_value)?;
+                        }
+                    } else {
+                        debug!("No type attribute, falling back to generic parsing");
+                        // No type attribute, fall back to generic parsing
+                        let py_value = xml_to_python(py, child, Some(field_info))?;
+                        instance.setattr(child_name.as_str(), py_value)?;
                     }
-                    instance.setattr(child_name.as_str(), list)?;
                 } else if grand_children.len() == 1 {
                     if let Some(XmlValue::Text(text)) = grand_children.get(0) {
                         let py_value =
@@ -765,12 +1092,40 @@ pub fn create_instance_from_xml_events(
                                     if item_children.len() == 1 {
                                         if let Some(XmlValue::Text(text)) = item_children.get(0) {
                                             // Get value type if available
-                                            let value_type = type_info.args.get(1);
-                                            let py_value = xml_to_python(
-                                                py,
-                                                &XmlValue::Text(text.clone()),
-                                                value_type,
-                                            )?;
+                                            let py_value = if let Some(value_type) =
+                                                type_info.args.get(1)
+                                            {
+                                                xml_to_python(
+                                                    py,
+                                                    &XmlValue::Text(text.clone()),
+                                                    Some(value_type),
+                                                )?
+                                            } else if let Some(type_attr) = item_attrs.get("type") {
+                                                // Use type attribute if no type args
+                                                match type_attr.as_str() {
+                                                    "int" => {
+                                                        text.parse::<i64>().unwrap_or(0).into_py(py)
+                                                    }
+                                                    "float" => text
+                                                        .parse::<f64>()
+                                                        .unwrap_or(0.0)
+                                                        .into_py(py),
+                                                    "bool" | "boolean" => {
+                                                        let val = match text.to_lowercase().as_str()
+                                                        {
+                                                            "true" | "1" | "yes" => true,
+                                                            "false" | "0" | "no" => false,
+                                                            _ => false,
+                                                        };
+                                                        val.into_py(py)
+                                                    }
+                                                    "str" | "string" => text.into_py(py),
+                                                    _ => text.into_py(py), // Default to string
+                                                }
+                                            } else {
+                                                // No type info, default to string
+                                                text.into_py(py)
+                                            };
                                             py_dict.set_item(key, py_value)?;
                                         }
                                     }
@@ -798,41 +1153,70 @@ pub fn create_instance_from_xml_events(
             if tag_name == "tuple" {
                 let items = PyList::empty(py);
 
+                // Check if this is a homogeneous tuple (Tuple[int, ...])
+                let is_homogeneous = type_info.args.len() == 2
+                    && type_info
+                        .args
+                        .get(1)
+                        .map(|t| t.name == "Ellipsis")
+                        .unwrap_or(false);
+
                 // Process each item with its expected type
                 for (i, child) in children.iter().enumerate() {
                     if let XmlValue::Element(item_name, item_attrs, item_children) = child {
-                        if item_name == "item" && item_children.len() == 1 {
-                            if let Some(XmlValue::Text(text)) = item_children.get(0) {
-                                // Get the type for this position if available
-                                let py_value = if let Some(type_from_args) = type_info.args.get(i) {
-                                    // Use the typed argument
-                                    xml_to_python(
-                                        py,
-                                        &XmlValue::Text(text.clone()),
-                                        Some(type_from_args),
-                                    )?
-                                } else if let Some(type_attr) = item_attrs.get("type") {
-                                    // Use type attribute if no args specified
-                                    match type_attr.as_str() {
-                                        "int" => text.parse::<i64>().unwrap_or(0).into_py(py),
-                                        "float" => text.parse::<f64>().unwrap_or(0.0).into_py(py),
-                                        "bool" | "boolean" => {
-                                            let val = match text.to_lowercase().as_str() {
-                                                "true" | "1" | "yes" => true,
-                                                "false" | "0" | "no" => false,
-                                                _ => false,
-                                            };
-                                            val.into_py(py)
-                                        }
-                                        "str" | "string" => text.into_py(py),
-                                        _ => text.into_py(py), // Default to string
-                                    }
-                                } else {
-                                    // No type info, default to string
-                                    text.into_py(py)
-                                };
+                        if item_name == "item" {
+                            // Get the expected type for this position
+                            let expected_type = if is_homogeneous {
+                                // For Tuple[int, ...], use first arg for all positions
+                                type_info.args.get(0)
+                            } else {
+                                // For fixed tuples, get type for specific position
+                                type_info.args.get(i)
+                            };
 
+                            // Check if this is a complex type (has child elements)
+                            if !item_children.is_empty()
+                                && item_children
+                                    .iter()
+                                    .any(|c| matches!(c, XmlValue::Element(_, _, _)))
+                            {
+                                // Complex type - parse as XML element
+                                let py_value = xml_to_python(py, child, expected_type)?;
                                 items.append(py_value)?;
+                            } else if item_children.len() == 1 {
+                                if let Some(XmlValue::Text(text)) = item_children.get(0) {
+                                    let py_value = if let Some(elem_type) = expected_type {
+                                        // Use the typed argument
+                                        xml_to_python(
+                                            py,
+                                            &XmlValue::Text(text.clone()),
+                                            Some(elem_type),
+                                        )?
+                                    } else if let Some(type_attr) = item_attrs.get("type") {
+                                        // Use type attribute if no args specified
+                                        match type_attr.as_str() {
+                                            "int" => text.parse::<i64>().unwrap_or(0).into_py(py),
+                                            "float" => {
+                                                text.parse::<f64>().unwrap_or(0.0).into_py(py)
+                                            }
+                                            "bool" | "boolean" => {
+                                                let val = match text.to_lowercase().as_str() {
+                                                    "true" | "1" | "yes" => true,
+                                                    "false" | "0" | "no" => false,
+                                                    _ => false,
+                                                };
+                                                val.into_py(py)
+                                            }
+                                            "str" | "string" => text.into_py(py),
+                                            _ => text.into_py(py), // Default to string
+                                        }
+                                    } else {
+                                        // No type info, default to string
+                                        text.into_py(py)
+                                    };
+
+                                    items.append(py_value)?;
+                                }
                             }
                         }
                     }
@@ -861,18 +1245,41 @@ pub fn create_instance_from_xml_events(
 
                 // Process each item
                 for child in children {
-                    if let XmlValue::Element(item_name, _, item_children) = child {
+                    if let XmlValue::Element(item_name, item_attrs, item_children) = child {
                         if item_name == "item" {
                             // Get the value - it should be in item_children
                             if item_children.len() == 1 {
                                 if let Some(XmlValue::Text(text)) = item_children.get(0) {
                                     // Get element type if available
-                                    let element_type = type_info.args.get(0);
-                                    let py_value = xml_to_python(
-                                        py,
-                                        &XmlValue::Text(text.clone()),
-                                        element_type,
-                                    )?;
+                                    let py_value = if let Some(element_type) = type_info.args.get(0)
+                                    {
+                                        xml_to_python(
+                                            py,
+                                            &XmlValue::Text(text.clone()),
+                                            Some(element_type),
+                                        )?
+                                    } else if let Some(type_attr) = item_attrs.get("type") {
+                                        // Use type attribute if no type args
+                                        match type_attr.as_str() {
+                                            "int" => text.parse::<i64>().unwrap_or(0).into_py(py),
+                                            "float" => {
+                                                text.parse::<f64>().unwrap_or(0.0).into_py(py)
+                                            }
+                                            "bool" | "boolean" => {
+                                                let val = match text.to_lowercase().as_str() {
+                                                    "true" | "1" | "yes" => true,
+                                                    "false" | "0" | "no" => false,
+                                                    _ => false,
+                                                };
+                                                val.into_py(py)
+                                            }
+                                            "str" | "string" => text.into_py(py),
+                                            _ => text.into_py(py), // Default to string
+                                        }
+                                    } else {
+                                        // No type info, default to string
+                                        text.into_py(py)
+                                    };
                                     add_method.call1((py_value,))?;
                                 }
                             }
@@ -957,20 +1364,42 @@ pub fn create_instance_from_xml_events(
                                             if &arg.name == type_val {
                                                 // Create instance of this specific type
                                                 if let Some(py_type) = &arg.py_type {
-                                                    let instance = py_type.as_ref(py).call0()?;
+                                                    // Check if the type has __gasp_from_partial__ method
+                                                    let instance = if py_type
+                                                        .as_ref(py)
+                                                        .hasattr("__gasp_from_partial__")?
+                                                    {
+                                                        let empty_dict =
+                                                            pyo3::types::PyDict::new(py);
+                                                        py_type.as_ref(py).call_method1(
+                                                            "__gasp_from_partial__",
+                                                            (empty_dict,),
+                                                        )?
+                                                    } else {
+                                                        py_type.as_ref(py).call0()?
+                                                    };
 
                                                     // Set fields from item children
                                                     for item_child in &item_children {
                                                         if let XmlValue::Element(
                                                             field_name,
-                                                            _,
+                                                            field_attrs,
                                                             field_children,
                                                         ) = item_child
                                                         {
                                                             if let Some(field_info) =
                                                                 arg.fields.get(field_name)
                                                             {
-                                                                if field_children.len() == 1 {
+                                                                // Check if this is a simple scalar field with single text child
+                                                                if field_children.len() == 1
+                                                                    && matches!(
+                                                                        field_info.kind,
+                                                                        PyTypeKind::String
+                                                                            | PyTypeKind::Integer
+                                                                            | PyTypeKind::Float
+                                                                            | PyTypeKind::Boolean
+                                                                    )
+                                                                {
                                                                     if let Some(XmlValue::Text(
                                                                         text,
                                                                     )) = field_children.get(0)
@@ -988,6 +1417,21 @@ pub fn create_instance_from_xml_events(
                                                                             py_value,
                                                                         )?;
                                                                     }
+                                                                } else {
+                                                                    // For complex fields like lists, unions, classes, use xml_to_python with the full element
+                                                                    let py_value = xml_to_python(
+                                                                        py,
+                                                                        &XmlValue::Element(
+                                                                            field_name.clone(),
+                                                                            field_attrs.clone(),
+                                                                            field_children.clone(),
+                                                                        ),
+                                                                        Some(field_info),
+                                                                    )?;
+                                                                    instance.setattr(
+                                                                        field_name.as_str(),
+                                                                        py_value,
+                                                                    )?;
                                                                 }
                                                             }
                                                         }
@@ -1004,7 +1448,19 @@ pub fn create_instance_from_xml_events(
                                     if elem_type.kind == PyTypeKind::Class {
                                         // For class types, we need to create an instance
                                         if let Some(py_type) = &elem_type.py_type {
-                                            let instance = py_type.as_ref(py).call0()?;
+                                            // Check if the type has __gasp_from_partial__ method
+                                            let instance = if py_type
+                                                .as_ref(py)
+                                                .hasattr("__gasp_from_partial__")?
+                                            {
+                                                let empty_dict = pyo3::types::PyDict::new(py);
+                                                py_type.as_ref(py).call_method1(
+                                                    "__gasp_from_partial__",
+                                                    (empty_dict,),
+                                                )?
+                                            } else {
+                                                py_type.as_ref(py).call0()?
+                                            };
 
                                             // Set fields from item children
                                             for item_child in &item_children {
@@ -1245,6 +1701,18 @@ pub fn create_instance_from_xml_events(
                             }
 
                             instance.setattr(child_name.as_str(), py_list)?;
+                        } else if field_info.kind == PyTypeKind::Union {
+                            // Handle Union fields
+                            debug!(
+                                "Processing Union field '{}' in create_instance_from_xml_events",
+                                child_name
+                            );
+                            let py_value = xml_to_python(
+                                py,
+                                &XmlValue::Element(child_name.clone(), child_attrs, child_children),
+                                Some(field_info),
+                            )?;
+                            instance.setattr(child_name.as_str(), py_value)?;
                         } else if child_children.len() == 1 {
                             // Handle scalar fields with single text child
                             if let Some(XmlValue::Text(text)) = child_children.get(0) {

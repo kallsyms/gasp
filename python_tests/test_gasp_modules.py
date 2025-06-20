@@ -54,9 +54,13 @@ def test_interpolate_prompt():
     prompt = interpolate_prompt(template, Person)
     
     # Check that the prompt contains the expected content
-    assert "Your response should be formatted as:" in prompt
-    assert "<Person>" in prompt
     assert "Create a person:" in prompt
+    assert "<Person>" in prompt
+    assert "</Person>" in prompt
+    assert "<name type=" in prompt
+    assert "<age type=" in prompt
+    # The Optional[List[str]] field might show as optional
+    assert "hobbies" in prompt
 
 
 def test_deserializable_from_partial():
@@ -143,17 +147,25 @@ def test_stream_parser_basic():
     """Test StreamParser basic functionality"""
     stream_parser = gasp.StreamParser()
     
-    # StreamParser is a low-level parser that doesn't take a type
-    # It just parses JSON/XML data
-    json_data = '{"name": "Eve", "age": 28}'
+    # StreamParser is a low-level parser that parses XML data
+    xml_data = '<result><name>Eve</name><age>28</age></result>'
     
-    result = stream_parser.parse(json_data)
+    result = stream_parser.parse(xml_data)
     
     assert stream_parser.is_done()
     assert result is not None
+    # The result should be a dict representation of the XML
     assert isinstance(result, dict)
-    assert result["name"] == "Eve"
-    assert result["age"] == 28
+    assert result["name"] == "result"
+    assert "children" in result
+    # Check the parsed structure
+    children = result["children"]
+    assert len(children) == 2
+    # Find name and age elements
+    name_elem = next(c for c in children if c["name"] == "name")
+    age_elem = next(c for c in children if c["name"] == "age")
+    assert name_elem["children"] == ["Eve"]
+    assert age_elem["children"] == ["28"]
 
 
 def test_model_dump():

@@ -47,19 +47,17 @@ def test_parser():
     # Create a parser for the Parent type
     parser = Parser(Parent)
     
-    # Test with JSON data that includes a nested Child object
-    json_data = '''<Parent>
-    {
-        "name": "Senior",
-        "child": {
-            "name": "Junior",
-            "age": 5
-        }
-    }
+    # Test with XML data that includes a nested Child object
+    xml_data = '''<Parent>
+        <name type="str">Senior</name>
+        <child type="Child">
+            <name type="str">Junior</name>
+            <age type="int">5</age>
+        </child>
     </Parent>'''
     
     # Parse the data
-    result = parser.feed(json_data)
+    result = parser.feed(xml_data)
     print(f"Parsed result: {result}")
     print(f"Result type: {type(result)}")
     

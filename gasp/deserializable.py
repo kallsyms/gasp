@@ -13,10 +13,31 @@ class Deserializable:
     @classmethod
     def __gasp_from_partial__(cls, partial_data):
         """Create an instance from partial data"""
+        print(f"Deserializable.__gasp_from_partial__ called for {cls.__name__} with keys: {list(partial_data.keys())}")
         instance = cls()
         
         # Get type annotations to check for nested types
         annotations = getattr(cls, "__annotations__", {})
+        
+        # Initialize all annotated fields with appropriate defaults
+        for field_name, field_type in annotations.items():
+            if field_name not in partial_data:
+                # Set default values based on type
+                if hasattr(field_type, "__origin__"):
+                    if field_type.__origin__ is list:
+                        setattr(instance, field_name, [])
+                    elif field_type.__origin__ is dict:
+                        setattr(instance, field_name, {})
+                    elif field_type.__origin__ is set:
+                        setattr(instance, field_name, set())
+                    elif field_type.__origin__ is tuple:
+                        setattr(instance, field_name, ())
+                    # For Optional/Union types, set to None
+                    elif hasattr(field_type, "__args__") and type(None) in field_type.__args__:
+                        setattr(instance, field_name, None)
+                else:
+                    # For regular types, set to None (caller should handle required fields)
+                    setattr(instance, field_name, None)
         
         for key, value in partial_data.items():
             # Check if this field should be a specific type

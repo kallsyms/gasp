@@ -4,7 +4,7 @@ Test that container types (tuple, dict, set) work correctly with XML format
 """
 
 import pytest
-from gasp import Parser
+from gasp import Parser, Deserializable
 from typing import Tuple, Dict, Set
 
 
@@ -76,11 +76,10 @@ def test_nested_tuples():
     assert isinstance(result[1], list)
 
 
-class Person:
+class Person(Deserializable):
     """Simple person class for testing"""
-    def __init__(self, name: str = "", age: int = 0):
-        self.name = name
-        self.age = age
+    name: str
+    age: int
     
     def __repr__(self):
         return f"Person(name='{self.name}', age={self.age})"

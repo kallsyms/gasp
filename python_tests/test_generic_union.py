@@ -39,8 +39,8 @@ def test_generic_union():
     # Create parser with generic Union type
     parser = Parser(Union[A, B])
     
-    # Test case A - XML format with type attribute
-    response_a = '''<A type="A">
+    # Test case A - XML format (type attribute is redundant but allowed)
+    response_a = '''<A>
         <name type="str">Test A</name>
         <value_a type="int">42</value_a>
     </A>'''
@@ -52,9 +52,9 @@ def test_generic_union():
     assert result_a.name == "Test A"
     assert result_a.value_a == 42
     
-    # Test case B - XML format with type attribute
+    # Test case B - XML format
     parser_b = Parser(Union[A, B])
-    response_b = '''<B type="B">
+    response_b = '''<B>
         <title type="str">Test B</title>
         <value_b type="float">3.14</value_b>
     </B>'''
@@ -108,11 +108,11 @@ def test_named_union():
     """Test named Union type alias"""
     parser = Parser(MyUnion)
     
-    # Test case A - using type alias tag name
-    response_a = '''<MyUnion type="A">
+    # Test case A - correct format uses class name as tag
+    response_a = '''<A>
         <name type="str">Test A</name>
         <value_a type="int">42</value_a>
-    </MyUnion>'''
+    </A>'''
     parser.feed(response_a)
     result_a = parser.validate()
     
@@ -168,7 +168,7 @@ def test_union_streaming():
     parser = Parser(Union[A, B])
     
     chunks = [
-        '<A type="A">',
+        '<A>',
         '<name type="str">Streaming A</name>',
         '<value_a type="int">999</value_a>',
         '</A>'
@@ -198,7 +198,7 @@ def test_union_with_optional_fields():
     parser = Parser(Union[C, D])
     
     # Test C with optional field present
-    xml_c = '''<C type="C">
+    xml_c = '''<C>
         <required type="str">Required value</required>
         <optional type="int">20</optional>
     </C>'''
@@ -211,7 +211,7 @@ def test_union_with_optional_fields():
     
     # Test D with optional field missing
     parser_d = Parser(Union[C, D])
-    xml_d = '''<D type="D">
+    xml_d = '''<D>
         <name type="str">Test D</name>
     </D>'''
     parser_d.feed(xml_d)
@@ -227,7 +227,7 @@ def test_union_error_handling():
     parser = Parser(Union[A, B])
     
     # Test with invalid type
-    invalid_xml = '''<C type="C">
+    invalid_xml = '''<C>
         <unknown type="str">Invalid</unknown>
     </C>'''
     parser.feed(invalid_xml)

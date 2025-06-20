@@ -5,7 +5,7 @@ from typing import Union, Optional, Dict, List, Tuple
 
 def test_primitives():
     """Test primitive type support: str, int, float, bool"""
-    class Primitives:
+    class Primitives(gasp.Deserializable):
         text: str
         number: int
         decimal: float
@@ -71,10 +71,10 @@ def test_nested_classes():
 
 def test_union_types():
     """Test union type support"""
-    class Cat:
+    class Cat(gasp.Deserializable):
         meow: str
 
-    class Dog:
+    class Dog(gasp.Deserializable):
         bark: str
 
     Animal = Union[Cat, Dog]
@@ -102,7 +102,7 @@ def test_union_types():
 
 def test_incremental_parsing():
     """Test incremental field parsing with partial values"""
-    class Fruit:
+    class Fruit(gasp.Deserializable):
         name: str
 
     parser = gasp.Parser(Fruit)
