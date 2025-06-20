@@ -42,16 +42,6 @@ impl StreamParser {
             .map(|e| e.map_err(|e| XmlError::ParserError(e.to_string())))
             .collect();
 
-        // Check if we've received an EndDocument event
-        if let Ok(ref evts) = events {
-            for evt in evts {
-                if matches!(evt, Event::EndDocument) {
-                    self.done = true;
-                    break;
-                }
-            }
-        }
-
         events
     }
 }

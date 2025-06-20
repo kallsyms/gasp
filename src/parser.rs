@@ -107,23 +107,120 @@ impl TypedStreamParser {
                             let py_list = list_obj.as_ref(py).downcast::<pyo3::types::PyList>().unwrap();
                             let current_len = py_list.len();
                             
-                            // Count ALL <item> opening tags (not just complete ones)
+                            // For nested lists, only count items with the correct type attribute
                             let mut item_starts = Vec::new();
                             let mut pos = 0;
+                            
+                            // Determine the expected type attribute for items
+                            let expected_type = match element_type.kind {
+                                crate::python_types::PyTypeKind::List => {
+                                    // For List[List[X]], items should have type="list[X]"
+                                    if let Some(inner_type) = element_type.args.get(0) {
+                                        format!("list[{}]", inner_type.name)
+                                    } else {
+                                        "list".to_string()
+                                    }
+                                }
+                                _ => element_type.name.clone()
+                            };
+                            
                             while let Some(start) = self.xml_buffer[pos..].find("<item") {
-                                item_starts.push(pos + start);
-                                pos = pos + start + 5;
+                                let item_start = pos + start;
+                                
+                                // Check if this item has the expected type
+                                let item_end = self.xml_buffer[item_start..].find('>')
+                                    .map(|e| item_start + e)
+                                    .unwrap_or(self.xml_buffer.len());
+                                let item_tag = &self.xml_buffer[item_start..item_end];
+                                
+                                // Extract type attribute
+                                if let Some(type_start) = item_tag.find("type=\"") {
+                                    let type_start = type_start + 6;
+                                    if let Some(type_end) = item_tag[type_start..].find('"') {
+                                        let item_type = &item_tag[type_start..type_start + type_end];
+                                        
+                                        // Only add this item if it matches the expected type
+                                        if item_type == expected_type {
+                                            item_starts.push(item_start);
+                                        }
+                                    }
+                                }
+                                
+                                pos = item_start + 5;
                             }
                             
                             // Create items for any we haven't processed yet
                             for i in current_len..item_starts.len() {
-                                if let Some(py_type) = &element_type.py_type {
-                                    // Create new item
-                                    let item = if py_type.as_ref(py).hasattr("__gasp_from_partial__").unwrap_or(false) {
-                                        let empty_dict = pyo3::types::PyDict::new(py);
-                                        py_type.as_ref(py).call_method1("__gasp_from_partial__", (empty_dict,)).unwrap()
+                                // For Union types, we need to determine the actual type first
+                                if element_type.kind == crate::python_types::PyTypeKind::Union {
+                                    // Look at the item to determine its type
+                                    let item_start = item_starts[i];
+                                    let item_end = self.xml_buffer[item_start..].find("</item>")
+                                        .map(|e| item_start + e)
+                                        .unwrap_or(self.xml_buffer.len());
+                                    let item_content = &self.xml_buffer[item_start..item_end];
+                                    
+                                    // Try to extract type attribute from item tag
+                                    let type_name = if let Some(type_start) = item_content.find("type=\"") {
+                                        let type_start = type_start + 6;
+                                        if let Some(type_end) = item_content[type_start..].find('"') {
+                                            Some(&item_content[type_start..type_start + type_end])
+                                        } else {
+                                            None
+                                        }
                                     } else {
-                                        py_type.as_ref(py).call0().unwrap()
+                                        None
+                                    };
+                                    
+                                    // Find the matching union member
+                                    if let Some(type_name) = type_name {
+                                        for member in &element_type.args {
+                                            if member.name == type_name {
+                                                if let Some(member_py_type) = &member.py_type {
+                                                    let item = if member_py_type.as_ref(py).hasattr("__gasp_from_partial__").unwrap_or(false) {
+                                                        let empty_dict = pyo3::types::PyDict::new(py);
+                                                        member_py_type.as_ref(py).call_method1("__gasp_from_partial__", (empty_dict,)).unwrap()
+                                                    } else {
+                                                        member_py_type.as_ref(py).call0().unwrap()
+                                                    };
+                                                    py_list.append(item).unwrap();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Non-union type, create instance based on element type kind
+                                    let item: PyObject = match element_type.kind {
+                                        crate::python_types::PyTypeKind::List => {
+                                            // For nested lists, create an empty list
+                                            pyo3::types::PyList::empty(py).into()
+                                        }
+                                        crate::python_types::PyTypeKind::Dict => {
+                                            // For dicts, create an empty dict
+                                            pyo3::types::PyDict::new(py).into()
+                                        }
+                                        crate::python_types::PyTypeKind::Set => {
+                                            // For sets, create an empty set
+                                            py.eval("set()", None, None).unwrap().into()
+                                        }
+                                        crate::python_types::PyTypeKind::Tuple => {
+                                            // For tuples, create an empty list (will convert later)
+                                            pyo3::types::PyList::empty(py).into()
+                                        }
+                                        _ => {
+                                            // For other types, use the py_type if available
+                                            if let Some(py_type) = &element_type.py_type {
+                                                if py_type.as_ref(py).hasattr("__gasp_from_partial__").unwrap_or(false) {
+                                                    let empty_dict = pyo3::types::PyDict::new(py);
+                                                    py_type.as_ref(py).call_method1("__gasp_from_partial__", (empty_dict,)).unwrap().into()
+                                                } else {
+                                                    py_type.as_ref(py).call0().unwrap().into()
+                                                }
+                                            } else {
+                                                py.None()
+                                            }
+                                        }
                                     };
                                     py_list.append(item).unwrap();
                                 }
@@ -134,45 +231,98 @@ impl TypedStreamParser {
                                 if idx < py_list.len() {
                                     let item = py_list.get_item(idx).unwrap();
                                     
-                                    // Extract fields for this item
+                                    // Extract content for this item
                                     let item_end = self.xml_buffer[*item_start..].find("</item>")
                                         .map(|e| item_start + e)
                                         .unwrap_or(self.xml_buffer.len());
                                     
                                     let item_content = &self.xml_buffer[*item_start..item_end];
                                     
-                                    // Update each field
-                                    for (field_name, field_info) in &element_type.fields {
-                                        let field_start = format!("<{}", field_name);
-                                        let field_end = format!("</{}>", field_name);
+                                    // Special handling for nested lists
+                                    if element_type.kind == crate::python_types::PyTypeKind::List {
+                                        // This is a nested list - find all inner items
+                                        let inner_list = item.downcast::<pyo3::types::PyList>().unwrap();
                                         
-                                        if let Some(fs) = item_content.find(&field_start) {
-                                            if let Some(tag_end) = item_content[fs..].find('>') {
-                                                let content_start = fs + tag_end + 1;
+                                        // Find all <item type="..."> tags within this list item
+                                        let mut inner_pos = 0;
+                                        while let Some(inner_start) = item_content[inner_pos..].find("<item") {
+                                            let inner_start_abs = inner_pos + inner_start;
+                                            
+                                            // Check if this inner item is complete
+                                            if let Some(inner_end) = item_content[inner_start_abs..].find("</item>") {
+                                                let inner_end_abs = inner_start_abs + inner_end;
                                                 
-                                                // Find field content (either to closing tag or end of item)
-                                                let content_end = item_content[content_start..].find(&field_end)
-                                                    .map(|e| content_start + e)
-                                                    .unwrap_or(item_content.len());
+                                                // Extract the content between <item> and </item>
+                                                if let Some(content_start) = item_content[inner_start_abs..].find('>') {
+                                                    let content_start_abs = inner_start_abs + content_start + 1;
+                                                    let content = &item_content[content_start_abs..inner_end_abs].trim();
                                                     
-                                                let content = &item_content[content_start..content_end];
+                                                    if !content.is_empty() {
+                                                        // Parse based on inner element type
+                                                        if let Some(inner_elem_type) = element_type.args.get(0) {
+                                                            let py_value = match inner_elem_type.kind {
+                                                                crate::python_types::PyTypeKind::Integer => {
+                                                                    content.parse::<i64>().unwrap_or(0).into_py(py)
+                                                                }
+                                                                crate::python_types::PyTypeKind::Float => {
+                                                                    content.parse::<f64>().unwrap_or(0.0).into_py(py)
+                                                                }
+                                                                crate::python_types::PyTypeKind::Boolean => {
+                                                                    matches!(content.to_lowercase().as_str(), "true" | "1" | "yes").into_py(py)
+                                                                }
+                                                                _ => content.into_py(py)
+                                                            };
+                                                            
+                                                            // Only append if we don't already have this item
+                                                            // (to avoid duplicates during incremental parsing)
+                                                            let current_inner_len = inner_list.len();
+                                                            let expected_items = item_content.matches("</item>").count();
+                                                            if current_inner_len < expected_items {
+                                                                inner_list.append(py_value).unwrap();
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 
-                                                // Convert and set field value
-                                                let py_value = match field_info.kind {
-                                                    crate::python_types::PyTypeKind::String => content.into_py(py),
-                                                    crate::python_types::PyTypeKind::Integer => {
-                                                        content.trim().parse::<i64>().unwrap_or(0).into_py(py)
-                                                    }
-                                                    crate::python_types::PyTypeKind::Float => {
-                                                        content.trim().parse::<f64>().unwrap_or(0.0).into_py(py)
-                                                    }
-                                                    crate::python_types::PyTypeKind::Boolean => {
-                                                        matches!(content.trim().to_lowercase().as_str(), "true" | "1" | "yes").into_py(py)
-                                                    }
-                                                    _ => py.None()
-                                                };
-                                                
-                                                let _ = item.setattr(field_name.as_str(), py_value);
+                                                inner_pos = inner_end_abs + 7; // Move past </item>
+                                            } else {
+                                                break; // No closing tag yet
+                                            }
+                                        }
+                                    } else {
+                                        // Non-list items - update fields as before
+                                        for (field_name, field_info) in &element_type.fields {
+                                            let field_start = format!("<{}", field_name);
+                                            let field_end = format!("</{}>", field_name);
+                                            
+                                            if let Some(fs) = item_content.find(&field_start) {
+                                                if let Some(tag_end) = item_content[fs..].find('>') {
+                                                    let content_start = fs + tag_end + 1;
+                                                    
+                                                    // Find field content (either to closing tag or end of item)
+                                                    let content_end = item_content[content_start..].find(&field_end)
+                                                        .map(|e| content_start + e)
+                                                        .unwrap_or(item_content.len());
+                                                        
+                                                    let content = &item_content[content_start..content_end];
+                                                    
+                                                    // Convert and set field value
+                                                    let py_value = match field_info.kind {
+                                                        crate::python_types::PyTypeKind::String => content.into_py(py),
+                                                        crate::python_types::PyTypeKind::Integer => {
+                                                            content.trim().parse::<i64>().unwrap_or(0).into_py(py)
+                                                        }
+                                                        crate::python_types::PyTypeKind::Float => {
+                                                            content.trim().parse::<f64>().unwrap_or(0.0).into_py(py)
+                                                        }
+                                                        crate::python_types::PyTypeKind::Boolean => {
+                                                            matches!(content.trim().to_lowercase().as_str(), "true" | "1" | "yes").into_py(py)
+                                                        }
+                                                        _ => py.None()
+                                                    };
+                                                    
+                                                    let _ = item.setattr(field_name.as_str(), py_value);
+                                                }
                                             }
                                         }
                                     }

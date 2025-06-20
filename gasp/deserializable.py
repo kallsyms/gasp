@@ -22,8 +22,13 @@ class Deserializable:
         # Initialize all annotated fields with appropriate defaults
         for field_name, field_type in annotations.items():
             if field_name not in partial_data:
-                # Set default values based on type
-                if hasattr(field_type, "__origin__"):
+                # Check if the class has a default value for this field
+                if hasattr(cls, field_name):
+                    # Use the class-level default
+                    default_value = getattr(cls, field_name)
+                    setattr(instance, field_name, default_value)
+                # Otherwise set default values based on type
+                elif hasattr(field_type, "__origin__"):
                     if field_type.__origin__ is list:
                         setattr(instance, field_name, [])
                     elif field_type.__origin__ is dict:

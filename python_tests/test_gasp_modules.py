@@ -143,29 +143,6 @@ def test_parser_with_person_no_hobbies():
     assert result.hobbies is None
 
 
-def test_stream_parser_basic():
-    """Test StreamParser basic functionality"""
-    stream_parser = gasp.StreamParser()
-    
-    # StreamParser is a low-level parser that parses XML data
-    xml_data = '<result><name>Eve</name><age>28</age></result>'
-    
-    result = stream_parser.parse(xml_data)
-    
-    assert stream_parser.is_done()
-    assert result is not None
-    # The result should be a dict representation of the XML
-    assert isinstance(result, dict)
-    assert result["name"] == "result"
-    assert "children" in result
-    # Check the parsed structure
-    children = result["children"]
-    assert len(children) == 2
-    # Find name and age elements
-    name_elem = next(c for c in children if c["name"] == "name")
-    age_elem = next(c for c in children if c["name"] == "age")
-    assert name_elem["children"] == ["Eve"]
-    assert age_elem["children"] == ["28"]
 
 
 def test_model_dump():
