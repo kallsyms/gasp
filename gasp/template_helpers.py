@@ -280,35 +280,33 @@ def _format_union_type_from_args(args: Tuple[Type, ...], tag_name: str, structur
         non_none_type = next(arg for arg in args if arg is not type(None))
         return _format_optional_type(non_none_type, tag_name, structure_examples)
     
-    # Format each option
+    # For unions, we use the member type names as tags directly
     options = []
     for i, arg in enumerate(args):
+        if arg is type(None):
+            continue  # Skip None type in unions
+            
+        arg_name = getattr(arg, "__name__", f"Type{i+1}")
+        
         if _is_complex_type(arg):
-            # For complex types, add a description and track structure examples
-            arg_name = getattr(arg, "__name__", f"Type{i+1}")
-            option_content = f"{arg_name} object"
+            # For complex types, show the tag with object content
+            option_text = f"// Option {i+1}:\n<{arg_name}>\n{arg_name} object\n</{arg_name}>"
             
             # Add the type to structure examples with _type_name discrimination field
             if arg_name not in structure_examples:
                 structure_examples[arg_name] = _generate_structure_example_with_type_name(arg, arg_name)
         else:
-            # For simple types, generate standard format instructions
-            option_format = type_to_format_instructions(arg, tag_name)
+            # For simple types, generate format with the arg's own tag
+            option_format = type_to_format_instructions(arg, arg_name)
+            option_text = f"// Option {i+1}:\n{option_format}"
             
-            # Extract the content part (between the tags)
-            tag_open = f"<{tag_name}>"
-            tag_close = f"</{tag_name}>"
-            content_start = option_format.find(tag_open) + len(tag_open)
-            content_end = option_format.rfind(tag_close)
-            option_content = option_format[content_start:content_end]
-            
-        option_text = f"// Option {i+1}:\n{option_content}"
         options.append(option_text)
     
     separator = "\n\n- OR -\n\n"
     all_options = separator.join(options)
     
-    return f"<{tag_name}>\n{all_options}\n</{tag_name}>"
+    # Return just the options without wrapping in the union tag
+    return all_options
 
 def _format_union_type(union_type: Type, tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for a Union type."""

@@ -171,13 +171,6 @@ impl TagFinder {
                 continue;
             }
 
-            // If the current tag is a wanted tag, emit it as bytes.
-            // This is the core of the "don't consume" logic.
-            if is_wanted && !self.inside_ignored {
-                let tag_content = self.buf[lt..=gt].to_owned();
-                emit(TagEvent::Bytes(tag_content))?;
-            }
-
             if !is_close {
                 /* <Tag> : opening tag */
                 debug!("[TagFinder::push] Processing Open Tag: '{}'", name);
@@ -188,9 +181,6 @@ impl TagFinder {
                 } else if is_wanted && !self.inside_ignored {
                     debug!("[TagFinder::push] Emitting Open for wanted tag: '{}'", name);
                     emit(TagEvent::Open(name.clone()))?;
-                    // After opening, emit the tag itself as bytes
-                    let tag_content = self.buf[lt..=gt].to_owned();
-                    emit(TagEvent::Bytes(tag_content))?;
                     if !self.inside {
                         self.inside = true;
                         debug!(
@@ -221,9 +211,6 @@ impl TagFinder {
                         name
                     );
                     emit(TagEvent::Close(name.clone()))?;
-                    // After closing, emit the tag itself as bytes
-                    let tag_content = self.buf[lt..=gt].to_owned();
-                    emit(TagEvent::Bytes(tag_content))?;
                     self.inside = false; // Assuming this closes the primary wanted tag
                     debug!(
                         "[TagFinder::push] Set self.inside = false for tag '{}'",

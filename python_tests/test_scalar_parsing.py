@@ -4,205 +4,242 @@ Test for scalar type parsing in GASP
 Tests all basic scalar types: str, int, float, bool
 """
 
+import pytest
 from gasp import Parser
+
 
 def test_string_parsing():
     """Test string parsing"""
-    print("=== Testing string parsing ===")
-    
-    # Test with tags
+    # Test with XML tags
     parser = Parser(str)
-    json_data = '''<str>"Hello, world!"</str>'''
+    xml_data = '''<value type="string">Hello, world!</value>'''
     
-    print(f"Input: {json_data}")
-    result = parser.feed(json_data)
-    print(f"Parsed result: {result}")
-    print(f"Result type: {type(result)}")
-    print(f"Is complete: {parser.is_complete()}")
+    result = parser.feed(xml_data)
+    assert result == "Hello, world!"
+    assert isinstance(result, str)
+    assert parser.is_complete()
     
-    if result is not None:
-        print(f"✓ String parsing with tags: '{result}'")
-        assert isinstance(result, str), f"Expected str but got {type(result)}"
-    else:
-        print("✗ ERROR: No result from string parsing with tags")
-    
-    # Test without tags
+    # Test with str tag
     parser2 = Parser(str)
-    json_data2 = '"Simple string"'
+    xml_data2 = '''<str type="string">Simple string</str>'''
     
-    print(f"\nInput: {json_data2}")
-    result2 = parser2.feed(json_data2)
-    print(f"Parsed result: {result2}")
-    print(f"Result type: {type(result2)}")
-    print(f"Is complete: {parser2.is_complete()}")
-    
-    if result2 is not None:
-        print(f"✓ String parsing without tags: '{result2}'")
-    else:
-        print("✗ ERROR: No result from string parsing without tags")
+    result2 = parser2.feed(xml_data2)
+    assert result2 == "Simple string"
+    assert isinstance(result2, str)
+    assert parser2.is_complete()
+
 
 def test_int_parsing():
     """Test integer parsing"""
-    print("\n=== Testing integer parsing ===")
-    
-    # Test with tags
+    # Test with XML tags
     parser = Parser(int)
-    json_data = '''<int>42</int>'''
+    xml_data = '''<value type="int">42</value>'''
     
-    print(f"Input: {json_data}")
-    result = parser.feed(json_data)
-    print(f"Parsed result: {result}")
-    print(f"Result type: {type(result)}")
-    print(f"Is complete: {parser.is_complete()}")
+    result = parser.feed(xml_data)
+    assert result == 42
+    assert isinstance(result, int)
+    assert parser.is_complete()
     
-    if result is not None:
-        print(f"✓ Integer parsing with tags: {result}")
-        assert isinstance(result, int), f"Expected int but got {type(result)}"
-        assert result == 42, f"Expected 42 but got {result}"
-    else:
-        print("✗ ERROR: No result from integer parsing with tags")
-    
-    # Test without tags
+    # Test with int tag
     parser2 = Parser(int)
-    json_data2 = '123'
+    xml_data2 = '''<int type="int">123</int>'''
     
-    print(f"\nInput: {json_data2}")
-    result2 = parser2.feed(json_data2)
-    print(f"Parsed result: {result2}")
-    print(f"Result type: {type(result2)}")
-    print(f"Is complete: {parser2.is_complete()}")
+    result2 = parser2.feed(xml_data2)
+    assert result2 == 123
+    assert isinstance(result2, int)
+    assert parser2.is_complete()
     
-    if result2 is not None:
-        print(f"✓ Integer parsing without tags: {result2}")
-    else:
-        print("✗ ERROR: No result from integer parsing without tags")
+    # Test negative integer
+    parser3 = Parser(int)
+    xml_data3 = '''<value type="int">-456</value>'''
+    
+    result3 = parser3.feed(xml_data3)
+    assert result3 == -456
+    assert isinstance(result3, int)
+
 
 def test_float_parsing():
     """Test float parsing"""
-    print("\n=== Testing float parsing ===")
-    
-    # Test with tags
+    # Test with XML tags
     parser = Parser(float)
-    json_data = '''<float>3.14159</float>'''
+    xml_data = '''<value type="float">3.14159</value>'''
     
-    print(f"Input: {json_data}")
-    result = parser.feed(json_data)
-    print(f"Parsed result: {result}")
-    print(f"Result type: {type(result)}")
-    print(f"Is complete: {parser.is_complete()}")
+    result = parser.feed(xml_data)
+    assert result is not None
+    assert abs(result - 3.14159) < 0.0001
+    assert isinstance(result, float)
+    assert parser.is_complete()
     
-    if result is not None:
-        print(f"✓ Float parsing with tags: {result}")
-        assert isinstance(result, float), f"Expected float but got {type(result)}"
-        assert abs(result - 3.14159) < 0.0001, f"Expected 3.14159 but got {result}"
-    else:
-        print("✗ ERROR: No result from float parsing with tags")
-    
-    # Test without tags
+    # Test with float tag
     parser2 = Parser(float)
-    json_data2 = '2.71828'
+    xml_data2 = '''<float type="float">2.71828</float>'''
     
-    print(f"\nInput: {json_data2}")
-    result2 = parser2.feed(json_data2)
-    print(f"Parsed result: {result2}")
-    print(f"Result type: {type(result2)}")
-    print(f"Is complete: {parser2.is_complete()}")
+    result2 = parser2.feed(xml_data2)
+    assert result2 is not None
+    assert abs(result2 - 2.71828) < 0.0001
+    assert isinstance(result2, float)
+    assert parser2.is_complete()
     
-    if result2 is not None:
-        print(f"✓ Float parsing without tags: {result2}")
-    else:
-        print("✗ ERROR: No result from float parsing without tags")
+    # Test negative float
+    parser3 = Parser(float)
+    xml_data3 = '''<value type="float">-1.5</value>'''
+    
+    result3 = parser3.feed(xml_data3)
+    assert result3 == -1.5
+    assert isinstance(result3, float)
+
 
 def test_bool_parsing():
     """Test boolean parsing"""
-    print("\n=== Testing boolean parsing ===")
-    
-    # Test True with tags
+    # Test True with XML tags
     parser = Parser(bool)
-    json_data = '''<bool>true</bool>'''
+    xml_data = '''<value type="bool">true</value>'''
     
-    print(f"Input: {json_data}")
-    result = parser.feed(json_data)
-    print(f"Parsed result: {result}")
-    print(f"Result type: {type(result)}")
-    print(f"Is complete: {parser.is_complete()}")
+    result = parser.feed(xml_data)
+    assert result is True
+    assert isinstance(result, bool)
+    assert parser.is_complete()
     
-    if result is not None:
-        print(f"✓ Boolean parsing with tags (true): {result}")
-        assert isinstance(result, bool), f"Expected bool but got {type(result)}"
-        assert result is True, f"Expected True but got {result}"
-    else:
-        print("✗ ERROR: No result from boolean parsing with tags (true)")
-    
-    # Test False with tags
+    # Test False with bool tag
     parser2 = Parser(bool)
-    json_data2 = '''<bool>false</bool>'''
+    xml_data2 = '''<bool type="bool">false</bool>'''
     
-    print(f"\nInput: {json_data2}")
-    result2 = parser2.feed(json_data2)
-    print(f"Parsed result: {result2}")
-    print(f"Result type: {type(result2)}")
-    print(f"Is complete: {parser2.is_complete()}")
+    result2 = parser2.feed(xml_data2)
+    assert result2 is False
+    assert isinstance(result2, bool)
+    assert parser2.is_complete()
     
-    if result2 is not None:
-        print(f"✓ Boolean parsing with tags (false): {result2}")
-        assert result2 is False, f"Expected False but got {result2}"
-    else:
-        print("✗ ERROR: No result from boolean parsing with tags (false)")
-    
-    # Test without tags
+    # Test with different case
     parser3 = Parser(bool)
-    json_data3 = 'true'
+    xml_data3 = '''<value type="bool">True</value>'''
     
-    print(f"\nInput: {json_data3}")
-    result3 = parser3.feed(json_data3)
-    print(f"Parsed result: {result3}")
-    print(f"Result type: {type(result3)}")
-    print(f"Is complete: {parser3.is_complete()}")
+    result3 = parser3.feed(xml_data3)
+    assert result3 is True
+    assert isinstance(result3, bool)
     
-    if result3 is not None:
-        print(f"✓ Boolean parsing without tags: {result3}")
-    else:
-        print("✗ ERROR: No result from boolean parsing without tags")
+    # Test False with different case
+    parser4 = Parser(bool)
+    xml_data4 = '''<value type="bool">False</value>'''
+    
+    result4 = parser4.feed(xml_data4)
+    assert result4 is False
+    assert isinstance(result4, bool)
+
 
 def test_none_parsing():
     """Test null/None parsing"""
-    print("\n=== Testing None/null parsing ===")
+    # Test with None type
+    parser = Parser(type(None))
+    xml_data = '''<value type="null">null</value>'''
     
-    # Test with no type specified (should handle null)
-    parser = Parser()
-    json_data = '''null'''
+    result = parser.feed(xml_data)
+    assert result is None
+    assert parser.is_complete()
     
-    print(f"Input: {json_data}")
-    result = parser.feed(json_data)
-    print(f"Parsed result: {result}")
-    print(f"Result type: {type(result)}")
-    print(f"Is complete: {parser.is_complete()}")
+    # Test with empty value
+    parser2 = Parser(type(None))
+    xml_data2 = '''<value type="null"></value>'''
     
-    if result is None:
-        print("✓ None/null parsing: None")
-    else:
-        print(f"✗ Unexpected result from null parsing: {result}")
+    result2 = parser2.feed(xml_data2)
+    assert result2 is None
 
-def main():
-    """Run all scalar parsing tests"""
-    print("Running GASP scalar type parsing tests...")
-    print("=" * 50)
+
+def test_streaming_scalar_parsing():
+    """Test streaming parsing of scalar types"""
+    # Test streaming string
+    parser = Parser(str)
+    chunks = [
+        '<value type="string">',
+        'Hello, ',
+        'streaming ',
+        'world!',
+        '</value>'
+    ]
     
-    try:
-        test_string_parsing()
-        test_int_parsing()
-        test_float_parsing()
-        test_bool_parsing()
-        test_none_parsing()
-        
-        print("\n" + "=" * 50)
-        print("All tests completed!")
-        
-    except Exception as e:
-        print(f"\n✗ Test failed with error: {e}")
-        import traceback
-        traceback.print_exc()
+    result = None
+    for chunk in chunks:
+        result = parser.feed(chunk)
+    
+    assert result == "Hello, streaming world!"
+    assert parser.is_complete()
+    
+    # Test streaming integer
+    parser2 = Parser(int)
+    chunks2 = [
+        '<value type="int">',
+        '12345',
+        '</value>'
+    ]
+    
+    result2 = None
+    for chunk in chunks2:
+        result2 = parser2.feed(chunk)
+    
+    assert result2 == 12345
+    assert parser2.is_complete()
+
+
+def test_edge_cases():
+    """Test edge cases for scalar parsing"""
+    # Test empty string
+    parser = Parser(str)
+    xml_data = '''<value type="string"></value>'''
+    
+    result = parser.feed(xml_data)
+    assert result == ""
+    assert isinstance(result, str)
+    
+    # Test zero integer
+    parser2 = Parser(int)
+    xml_data2 = '''<value type="int">0</value>'''
+    
+    result2 = parser2.feed(xml_data2)
+    assert result2 == 0
+    assert isinstance(result2, int)
+    
+    # Test zero float
+    parser3 = Parser(float)
+    xml_data3 = '''<value type="float">0.0</value>'''
+    
+    result3 = parser3.feed(xml_data3)
+    assert result3 == 0.0
+    assert isinstance(result3, float)
+    
+    # Test string with special characters
+    parser4 = Parser(str)
+    xml_data4 = '''<value type="string">Special &lt;chars&gt; &amp; "quotes"</value>'''
+    
+    result4 = parser4.feed(xml_data4)
+    assert result4 == 'Special <chars> & "quotes"'
+    assert isinstance(result4, str)
+
+
+def test_type_attribute_variations():
+    """Test different type attribute formats"""
+    # Test with str instead of string
+    parser = Parser(str)
+    xml_data = '''<value type="str">Test string</value>'''
+    
+    result = parser.feed(xml_data)
+    assert result == "Test string"
+    assert isinstance(result, str)
+    
+    # Test with integer instead of int
+    parser2 = Parser(int)
+    xml_data2 = '''<value type="integer">999</value>'''
+    
+    result2 = parser2.feed(xml_data2)
+    assert result2 == 999
+    assert isinstance(result2, int)
+    
+    # Test with boolean instead of bool
+    parser3 = Parser(bool)
+    xml_data3 = '''<value type="boolean">true</value>'''
+    
+    result3 = parser3.feed(xml_data3)
+    assert result3 is True
+    assert isinstance(result3, bool)
+
 
 if __name__ == "__main__":
-    main()
+    pytest.main([__file__, "-v"])

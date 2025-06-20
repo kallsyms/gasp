@@ -1,111 +1,149 @@
 #!/usr/bin/env python3
 """Test case for generic Union parsing and deserialization."""
 
+import pytest
 from typing import Union, List
 from gasp import Parser, Deserializable
+
 
 class A(Deserializable):
     """First type in union"""
     name: str
     value_a: int
+    
+    def __repr__(self):
+        return f"A(name='{self.name}', value_a={self.value_a})"
+    
+    def __eq__(self, other):
+        if not isinstance(other, A):
+            return False
+        return self.name == other.name and self.value_a == other.value_a
+
 
 class B(Deserializable):
     """Second type in union"""
     title: str  
     value_b: float
+    
+    def __repr__(self):
+        return f"B(title='{self.title}', value_b={self.value_b})"
+    
+    def __eq__(self, other):
+        if not isinstance(other, B):
+            return False
+        return self.title == other.title and self.value_b == other.value_b
 
-# Test 1: Using generic Union directly
+
 def test_generic_union():
-    print("=== Test 1: Generic Union ===")
-    
+    """Test generic Union with type attribute"""
     # Create parser with generic Union type
     parser = Parser(Union[A, B])
     
-    # Test case A
-    response_a = '<Union>{"_type_name": "A", "name": "Test A", "value_a": 42}</Union>'
+    # Test case A - XML format with type attribute
+    response_a = '''<A type="A">
+        <name type="str">Test A</name>
+        <value_a type="int">42</value_a>
+    </A>'''
     parser.feed(response_a)
     result_a = parser.validate()
     
-    print(f"Result A type: {type(result_a)}")
-    print(f"Result A: {result_a}")
-    print(f"Is instance of A? {isinstance(result_a, A)}")
-    print()
+    assert result_a is not None
+    assert isinstance(result_a, A)
+    assert result_a.name == "Test A"
+    assert result_a.value_a == 42
     
-    # Test case B  
+    # Test case B - XML format with type attribute
     parser_b = Parser(Union[A, B])
-    response_b = '<Union>{"_type_name": "B", "title": "Test B", "value_b": 3.14}</Union>'
+    response_b = '''<B type="B">
+        <title type="str">Test B</title>
+        <value_b type="float">3.14</value_b>
+    </B>'''
     parser_b.feed(response_b)
     result_b = parser_b.validate()
     
-    print(f"Result B type: {type(result_b)}")
-    print(f"Result B: {result_b}")
-    print(f"Is instance of B? {isinstance(result_b, B)}")
-    print()
+    assert result_b is not None
+    assert isinstance(result_b, B)
+    assert result_b.title == "Test B"
+    assert result_b.value_b == 3.14
 
-# Test 2: Without _type_name discrimination
+
 def test_generic_union_no_typename():
-    print("=== Test 2: Generic Union without _type_name ===")
-    
+    """Test generic Union without _type_name, using tag name for discrimination"""
     # Create parser with generic Union type
     parser = Parser(Union[A, B])
     
-    # Test case A (based on field matching)
-    response_a = '<Union>{"name": "Test A", "value_a": 42}</Union>'
+    # Test case A (based on field matching) - tag name determines type
+    response_a = '''<A>
+        <name type="str">Test A</name>
+        <value_a type="int">42</value_a>
+    </A>'''
     parser.feed(response_a)
     result_a = parser.validate()
     
-    print(f"Result A type: {type(result_a)}")
-    print(f"Result A: {result_a}")
-    print(f"Is instance of A? {isinstance(result_a, A)}")
-    print()
+    assert result_a is not None
+    assert isinstance(result_a, A)
+    assert result_a.name == "Test A"
+    assert result_a.value_a == 42
     
-    # Test case B (based on field matching)
+    # Test case B (based on field matching) - tag name determines type
     parser_b = Parser(Union[A, B])
-    response_b = '<Union>{"title": "Test B", "value_b": 3.14}</Union>'
+    response_b = '''<B>
+        <title type="str">Test B</title>
+        <value_b type="float">3.14</value_b>
+    </B>'''
     parser_b.feed(response_b)
     result_b = parser_b.validate()
     
-    print(f"Result B type: {type(result_b)}")
-    print(f"Result B: {result_b}")
-    print(f"Is instance of B? {isinstance(result_b, B)}")
-    print()
+    assert result_b is not None
+    assert isinstance(result_b, B)
+    assert result_b.title == "Test B"
+    assert result_b.value_b == 3.14
 
-# Test 3: Named type alias (for comparison)
+
+# Named type alias (for comparison)
 type MyUnion = Union[A, B]
 
+
 def test_named_union():
-    print("=== Test 3: Named Union Type Alias ===")
-    
+    """Test named Union type alias"""
     parser = Parser(MyUnion)
     
-    # Test case A
-    response_a = '<MyUnion>{"_type_name": "A", "name": "Test A", "value_a": 42}</MyUnion>'
+    # Test case A - using type alias tag name
+    response_a = '''<MyUnion type="A">
+        <name type="str">Test A</name>
+        <value_a type="int">42</value_a>
+    </MyUnion>'''
     parser.feed(response_a)
     result_a = parser.validate()
     
-    print(f"Result A type: {type(result_a)}")
-    print(f"Result A: {result_a}")
-    print(f"Is instance of A? {isinstance(result_a, A)}")
-    print()
+    assert result_a is not None
+    assert isinstance(result_a, A)
+    assert result_a.name == "Test A"
+    assert result_a.value_a == 42
 
-# Test 4: List of mixed Union items
+
 def test_list_of_mixed_union_items():
-    print("=== Test 4: List of Mixed Union Items ===")
+    """Test List of mixed Union items"""
     parser = Parser(List[Union[A, B]])
 
-    mixed_list_data = '''
-    <list>[
-        {"_type_name": "A", "name": "First A", "value_a": 123},
-        {"_type_name": "B", "title": "First B", "value_b": 45.67},
-        {"_type_name": "A", "name": "Second A", "value_a": 890}
-    ]</list>
-    '''
+    mixed_list_data = '''<list type="list[Union[A, B]]">
+        <item type="A">
+            <name type="str">First A</name>
+            <value_a type="int">123</value_a>
+        </item>
+        <item type="B">
+            <title type="str">First B</title>
+            <value_b type="float">45.67</value_b>
+        </item>
+        <item type="A">
+            <name type="str">Second A</name>
+            <value_a type="int">890</value_a>
+        </item>
+    </list>'''
     parser.feed(mixed_list_data)
     result = parser.validate()
 
-    print(f"Result type: {type(result)}")
-    print(f"Result: {result}")
-
+    assert result is not None
     assert isinstance(result, list)
     assert len(result) == 3
 
@@ -123,11 +161,109 @@ def test_list_of_mixed_union_items():
     assert isinstance(result[2], A)
     assert result[2].name == "Second A"
     assert result[2].value_a == 890
-    print("List of mixed union items test passed.")
-    print()
+
+
+def test_union_streaming():
+    """Test streaming parsing of Union types"""
+    parser = Parser(Union[A, B])
+    
+    chunks = [
+        '<A type="A">',
+        '<name type="str">Streaming A</name>',
+        '<value_a type="int">999</value_a>',
+        '</A>'
+    ]
+    
+    result = None
+    for chunk in chunks:
+        result = parser.feed(chunk)
+    
+    validated = parser.validate()
+    assert validated is not None
+    assert isinstance(validated, A)
+    assert validated.name == "Streaming A"
+    assert validated.value_a == 999
+
+
+def test_union_with_optional_fields():
+    """Test Union types with optional fields"""
+    class C(Deserializable):
+        required: str
+        optional: int = 10
+    
+    class D(Deserializable):
+        name: str
+        count: int = 0
+    
+    parser = Parser(Union[C, D])
+    
+    # Test C with optional field present
+    xml_c = '''<C type="C">
+        <required type="str">Required value</required>
+        <optional type="int">20</optional>
+    </C>'''
+    parser.feed(xml_c)
+    result_c = parser.validate()
+    
+    assert isinstance(result_c, C)
+    assert result_c.required == "Required value"
+    assert result_c.optional == 20
+    
+    # Test D with optional field missing
+    parser_d = Parser(Union[C, D])
+    xml_d = '''<D type="D">
+        <name type="str">Test D</name>
+    </D>'''
+    parser_d.feed(xml_d)
+    result_d = parser_d.validate()
+    
+    assert isinstance(result_d, D)
+    assert result_d.name == "Test D"
+    assert result_d.count == 0  # Default value
+
+
+def test_union_error_handling():
+    """Test error handling for Union types"""
+    parser = Parser(Union[A, B])
+    
+    # Test with invalid type
+    invalid_xml = '''<C type="C">
+        <unknown type="str">Invalid</unknown>
+    </C>'''
+    parser.feed(invalid_xml)
+    result = parser.validate()
+    
+    # Should return None or handle gracefully
+    # The exact behavior depends on the implementation
+    # but it shouldn't crash
+
+
+def test_nested_unions():
+    """Test nested Union types"""
+    class Container(Deserializable):
+        item: Union[A, B]
+        name: str
+    
+    parser = Parser(Container)
+    
+    xml_data = '''<Container>
+        <item type="A">
+            <name type="str">Nested A</name>
+            <value_a type="int">100</value_a>
+        </item>
+        <name type="str">Container Name</name>
+    </Container>'''
+    
+    parser.feed(xml_data)
+    result = parser.validate()
+    
+    assert result is not None
+    assert isinstance(result, Container)
+    assert result.name == "Container Name"
+    assert isinstance(result.item, A)
+    assert result.item.name == "Nested A"
+    assert result.item.value_a == 100
+
 
 if __name__ == "__main__":
-    test_generic_union()
-    test_generic_union_no_typename()
-    test_named_union()
-    test_list_of_mixed_union_items()
+    pytest.main([__file__, "-v"])
