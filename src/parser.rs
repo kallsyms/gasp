@@ -58,9 +58,90 @@ impl TypedStreamParser {
 
     /// Process a chunk of XML data with support for partial field values
     pub fn step(&mut self, chunk: &str) -> PyResult<Option<PyObject>> {
-        // For now, just accumulate the XML and use the tag_finder + xml_parser
-        // This is a simplified approach that doesn't support partial streaming
-        self.xml_buffer.push_str(chunk);
+        let mut result = None;
+
+        // Process each character to detect partial field content
+        for ch in chunk.chars() {
+            self.xml_buffer.push(ch);
+
+            // Try to detect field boundaries and content for incremental parsing
+            if let Some(type_info) = &self.type_info {
+                // Check if we're inside the main element for non-union types
+                if type_info.kind != crate::python_types::PyTypeKind::Union {
+                    if self.xml_buffer.contains(&format!("<{}>", type_info.name))
+                        || self.xml_buffer.contains(&format!("<{} ", type_info.name))
+                    {
+                        // We're inside the main element
+                        if self.partial_instance.is_none() {
+                            // Create instance on first encounter
+                            self.partial_instance = Some(pyo3::Python::with_gil(|py| {
+                                type_info
+                                    .py_type
+                                    .as_ref()
+                                    .unwrap()
+                                    .as_ref(py)
+                                    .call0()
+                                    .unwrap()
+                                    .into()
+                            }));
+                        }
+
+                        // Check for field tags and extract partial content
+                        for (field_name, field_info) in &type_info.fields {
+                            let field_start = format!("<{}", field_name);
+                            let field_end = format!("</{}>", field_name);
+
+                            if self.xml_buffer.contains(&field_start)
+                                && !self.xml_buffer.contains(&field_end)
+                            {
+                                // We're inside a field tag, extract partial content
+                                if let Some(start_idx) = self.xml_buffer.rfind('>') {
+                                    if start_idx < self.xml_buffer.len() - 1 {
+                                        let partial_content = &self.xml_buffer[start_idx + 1..];
+                                        if !partial_content.trim().is_empty()
+                                            && !partial_content.contains('<')
+                                        {
+                                            // Update the field with partial content
+                                            pyo3::Python::with_gil(|py| {
+                                                if let Some(instance) = &self.partial_instance {
+                                                    let _ = instance.as_ref(py).setattr(
+                                                        field_name.as_str(),
+                                                        partial_content,
+                                                    );
+                                                }
+                                            });
+                                            result = self.partial_instance.clone();
+                                        }
+                                    }
+                                }
+                            } else if self.xml_buffer.contains(&field_end) {
+                                // Field is complete, extract final content
+                                if let Some(start_idx) = self.xml_buffer.rfind(&field_start) {
+                                    if let Some(content_start) =
+                                        self.xml_buffer[start_idx..].find('>')
+                                    {
+                                        let content_start_abs = start_idx + content_start + 1;
+                                        if let Some(end_idx) = self.xml_buffer.rfind(&field_end) {
+                                            let content =
+                                                &self.xml_buffer[content_start_abs..end_idx];
+                                            // Update with final content
+                                            pyo3::Python::with_gil(|py| {
+                                                if let Some(instance) = &self.partial_instance {
+                                                    let _ = instance
+                                                        .as_ref(py)
+                                                        .setattr(field_name.as_str(), content);
+                                                }
+                                            });
+                                            result = self.partial_instance.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Feed to tag_finder
         let mut events = Vec::new();
@@ -73,7 +154,7 @@ impl TypedStreamParser {
                 pyo3::exceptions::PyValueError::new_err(format!("Tag parsing error: {:?}", e))
             })?;
 
-        // For Union types, we need to check if we've seen a complete tag
+        // For Union types and complete element detection, keep existing logic
         if let Some(type_info) = &self.type_info {
             if type_info.kind == crate::python_types::PyTypeKind::Union {
                 // First check if we have the union wrapper tag (e.g., <MyUnion type="A">)
@@ -179,7 +260,8 @@ impl TypedStreamParser {
             }
         }
 
-        Ok(None)
+        // Return the partial instance if we have one
+        Ok(result)
     }
 
     /// Check if parsing is complete
