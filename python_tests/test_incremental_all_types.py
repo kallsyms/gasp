@@ -42,9 +42,9 @@ class Address(gasp.Deserializable):
 def test_incremental_dict():
     """Test that dicts are built incrementally."""
     xml = """<dict type="dict[str, int]">
-<entry key="one" type="int">1</entry>
-<entry key="two" type="int">2</entry>
-<entry key="three" type="int">3</entry>
+<item key="one" type="int">1</item>
+<item key="two" type="int">2</item>
+<item key="three" type="int">3</item>
 </dict>"""
     
     parser = gasp.Parser(Dict[str, int])
