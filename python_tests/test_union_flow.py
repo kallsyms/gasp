@@ -40,13 +40,15 @@ type NamedUnion = Union[A, B]
 
 
 def test_named_union_with_type_attribute():
-    """Test named Union with type attribute in XML"""
+    """Test named Union - should use member tag name, not union name"""
     parser = Parser(NamedUnion)
     
-    xml_data = '''<NamedUnion type="A">
+    # Named unions should behave exactly like Union[A, B]
+    # The tag should be the actual type (A), not the union name
+    xml_data = '''<A>
         <name type="str">Named Test</name>
         <value_a type="int">100</value_a>
-    </NamedUnion>'''
+    </A>'''
     
     parser.feed(xml_data)
     result = parser.validate()

@@ -51,3 +51,14 @@ All tests in python_tests/test_container_types.py are passing:
 ## Next Steps:
 - Check if there are any other failing tests in the test suite
 - Consider running the full test suite to ensure no regressions
+
+# Nested Union and TypeAlias Fixes
+
+## Issue 1: Nested Union Parsing
+- **Issue**: When closing `</item>` tag in a Container with Union[A, B] field, the A object wasn't being popped
+- **Fix**: Updated `should_pop` logic to also check if parent Object has a field matching the closing tag
+
+## Issue 2: Named Type Aliases (type statement)
+- **Issue**: Type aliases like `type NamedUnion = Union[A, B]` aren't recognized as Union types
+- **Details**: TypeAliasType objects have `__value__` attribute containing the actual Union
+- **Fix**: Need to check for `__value__` attribute in extract_from_python
