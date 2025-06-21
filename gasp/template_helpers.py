@@ -347,7 +347,42 @@ def _format_list_type(list_type: Type, tag_name: str, structure_examples: Dict[s
     item_type = args[0]
     item_type_name = _get_type_name(item_type)
     
-    if _is_class_type(item_type):
+    # Special handling for List[Union[...]]
+    origin = get_origin(item_type)
+    if origin is Union:
+        # For lists of union types, we need to handle each union member
+        union_args = get_args(item_type)
+        
+        # Add structure examples for each union member that is a class
+        for arg in union_args:
+            if arg is not type(None) and _is_class_type(arg):
+                arg_name = getattr(arg, "__name__", "Object")
+                if arg_name not in structure_examples:
+                    structure_examples[arg_name] = _generate_class_structure_example(arg)
+        
+        # Show generic type attribute for union
+        return f'<{tag_name} type="list[{item_type_name}]">\n    <item type="{item_type_name}">...</item>\n    <item type="{item_type_name}">...</item>\n    ...\n</{tag_name}>'
+    elif origin is dict:
+        # Special handling for List[dict[...]]
+        dict_args = get_args(item_type)
+        if len(dict_args) == 2:
+            key_type, value_type = dict_args
+            value_type_name = _get_type_name(value_type)
+            
+            if _is_class_type(value_type):
+                value_class_name = getattr(value_type, "__name__", "Object")
+                if value_class_name not in structure_examples:
+                    structure_examples[value_class_name] = _generate_class_structure_example(value_type)
+                dict_content = f'\n        <item key="example_key" type="{value_type_name}">\n            ...{value_class_name} fields...\n        </item>\n        ...\n    '
+            else:
+                value_example = _get_example_value(value_type)
+                dict_content = f'\n        <item key="example_key" type="{value_type_name}">{value_example}</item>\n        ...\n    '
+        else:
+            dict_content = '\n        <item key="key">value</item>\n        ...\n    '
+            
+        # Show dict structure explicitly
+        return f'<{tag_name} type="list[{item_type_name}]">\n    <item type="{item_type_name}">{dict_content}</item>\n    <item type="{item_type_name}">{dict_content}</item>\n    ...\n</{tag_name}>'
+    elif _is_class_type(item_type):
         # For lists of complex types
         class_name = getattr(item_type, "__name__", "Object")
         

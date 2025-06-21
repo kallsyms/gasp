@@ -100,3 +100,97 @@ Updated the `template_helpers.py` module to generate XML format instructions tha
 
 ## Impact:
 LLMs using gasp will now receive much clearer format instructions that match exactly what the parser expects, reducing errors and improving response quality.
+
+---
+
+# Template Helpers Enhancement for List[Union[...]] - Complete ✅
+
+## Summary
+Fixed template helpers to properly generate structure examples for union types within lists, particularly for `List[Union[...]]` patterns.
+
+## Key Issues Fixed:
+
+### 1. Missing Structure Examples for Union Members
+- **Issue**: `List[Union[IssueForm, WaitForConfirmation]]` wasn't generating structure examples for the union members
+- **Fix**: Added special handling in `_format_list_type` to detect `Union` origin and extract structure examples for all class members
+
+### 2. Missing Dict Structure in List[dict[...]]
+- **Issue**: `List[dict[str, IssueForm]]` showed generic `...` instead of explicit dict structure
+- **Fix**: Enhanced `_format_list_type` to show explicit dict item structure with `<item key="example_key" type="IssueForm">` format
+
+## Code Changes:
+
+### gasp/template_helpers.py
+Added special handling for List[Union[...]] and List[dict[...]] in `_format_list_type`:
+- Detects Union origin and extracts structure examples for all class members
+- Detects dict origin and shows explicit dict structure with key attributes
+- Ensures all complex types get their structure examples included
+
+### python_tests/test_template_union_list.py
+Created comprehensive tests for:
+- Union lists with structure examples
+- Dict format using `<item key="...">` not `<key>`
+- Nested dict in list with proper structure
+- Union lists with primitive types (no structure examples)
+
+## Example Improvements:
+
+### List[dict[str, IssueForm]]
+**Before**: Generic placeholder
+**After**:
+```xml
+<List type="list[dict[str, IssueForm]]">
+    <item type="dict[str, IssueForm]">
+        <item key="example_key" type="IssueForm">
+            ...IssueForm fields...
+        </item>
+        ...
+    </item>
+    ...
+</List>
+```
+
+### List[Union[Chat, IssueForm, WaitForConfirmation]]
+Now includes structure examples for all union members!
+
+## Impact:
+LLMs will now receive much clearer instructions for complex nested types, reducing confusion about dict formatting and union member structures.
+
+---
+
+# Empty Class Support - Complete ✅
+
+## Summary
+Verified that GASP fully supports empty Python classes (classes with no fields or type annotations).
+
+## Key Findings:
+
+### 1. Empty Classes Work Out of the Box
+- Classes like `class Finalize: pass` parse successfully
+- No type annotations required
+- Python automatically creates empty `__annotations__` dict
+
+### 2. Both XML Tag Formats Supported
+- Regular tags: `<Finalize></Finalize>` ✅
+- Self-closing tags: `<Finalize />` ✅ (with minor quirk: `is_complete()` returns False but instance is created)
+
+### 3. Parser Behavior
+- Recognizes empty classes as `PyTypeKind::Class`
+- Creates instances using standard Python instantiation (`py_type.call0()`)
+- Returns empty instance immediately (no fields to populate)
+
+## Test Coverage:
+Created `python_tests/test_empty_classes.py` with tests for:
+- Basic empty class parsing
+- Self-closing tag support
+- Empty classes with docstrings
+- Incremental parsing behavior
+- Whitespace handling
+
+All tests pass! No code changes were needed - the parser already handles empty classes correctly.
+
+## Use Cases:
+- Marker classes
+- Base classes for inheritance
+- Simple data containers that will be populated dynamically
+- Command/message types that carry meaning in their type alone
