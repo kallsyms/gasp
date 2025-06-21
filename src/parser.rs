@@ -480,9 +480,11 @@ impl TypedStreamParser {
             };
 
             if self.stack.is_empty() {
-                // For root level, check if the tag matches the expected type
-                if actual_type.name == *tag_name
-                    || (tag_name == "list"
+                // For root level, check if the tag matches the expected type (case-insensitive)
+                let type_name_lower = actual_type.name.to_lowercase();
+                let tag_name_lower = tag_name.to_lowercase();
+                if type_name_lower == tag_name_lower
+                    || (tag_name_lower == "list"
                         && actual_type.kind == crate::python_types::PyTypeKind::List)
                 {
                     should_push = true;
@@ -570,14 +572,15 @@ impl TypedStreamParser {
 
         let mut child_object = None;
 
-        // Check if the closing tag matches the top of the stack.
+        // Check if the closing tag matches the top of the stack (case-insensitive).
+        let tag_name_lower = tag_name.to_lowercase();
         let should_pop = if let Some(top_frame) = self.stack.last() {
             match top_frame {
-                StackFrame::Field { name, .. } => name == tag_name,
+                StackFrame::Field { name, .. } => name.to_lowercase() == tag_name_lower,
                 StackFrame::Object { type_info, .. } => {
                     // For objects, check if the tag matches the type name
                     // OR if this is a field closing tag and the parent has that field
-                    &type_info.name == tag_name
+                    type_info.name.to_lowercase() == tag_name_lower
                         || (self.stack.len() > 1
                             && match &self.stack[self.stack.len() - 2] {
                                 StackFrame::Object {
@@ -586,23 +589,23 @@ impl TypedStreamParser {
                                 } => parent_type.fields.contains_key(tag_name),
                                 StackFrame::List { .. }
                                 | StackFrame::Set { .. }
-                                | StackFrame::Tuple { .. } => tag_name == "item",
+                                | StackFrame::Tuple { .. } => tag_name_lower == "item",
                                 _ => false,
                             })
                 }
                 StackFrame::List {
                     tag_name: list_tag, ..
-                } => list_tag == tag_name,
+                } => list_tag.to_lowercase() == tag_name_lower,
                 StackFrame::Set {
                     tag_name: set_tag, ..
-                } => set_tag == tag_name,
+                } => set_tag.to_lowercase() == tag_name_lower,
                 StackFrame::Tuple {
                     tag_name: tuple_tag,
                     ..
-                } => tuple_tag == tag_name,
+                } => tuple_tag.to_lowercase() == tag_name_lower,
                 StackFrame::Dict {
                     tag_name: dict_tag, ..
-                } => dict_tag == tag_name,
+                } => dict_tag.to_lowercase() == tag_name_lower,
             }
         } else {
             false
@@ -663,10 +666,12 @@ impl TypedStreamParser {
                 None
             };
 
-            if top_frame_name.as_deref() == Some(tag_name) {
-                if let Some(frame) = self.stack.pop() {
-                    self.stack_based_result = Some(self.frame_to_pyobject(frame)?);
-                    self.is_done = true;
+            if let Some(frame_name) = top_frame_name {
+                if frame_name.to_lowercase() == tag_name.to_lowercase() {
+                    if let Some(frame) = self.stack.pop() {
+                        self.stack_based_result = Some(self.frame_to_pyobject(frame)?);
+                        self.is_done = true;
+                    }
                 }
             }
         }
@@ -725,7 +730,9 @@ impl TypedStreamParser {
                 for event in &events {
                     match event {
                         crate::tag_finder::TagEvent::Open(tag) => {
-                            if tag.name == type_info.name && self.stack.is_empty() {
+                            if tag.name.to_lowercase() == type_info.name.to_lowercase()
+                                && self.stack.is_empty()
+                            {
                                 // Start collecting content for this primitive
                                 self.stack.push(StackFrame::Field {
                                     name: tag.name.clone(),
@@ -744,7 +751,9 @@ impl TypedStreamParser {
                             }
                         }
                         crate::tag_finder::TagEvent::Close(name) => {
-                            if name == &type_info.name && !self.stack.is_empty() {
+                            if name.to_lowercase() == type_info.name.to_lowercase()
+                                && !self.stack.is_empty()
+                            {
                                 if let Some(frame) = self.stack.pop() {
                                     let result = self.frame_to_pyobject(frame)?;
                                     self.stack_based_result = Some(result.clone());
@@ -813,12 +822,28 @@ impl PyParser {
 
                 let wanted_tags = match type_info.kind {
                     crate::python_types::PyTypeKind::Union => {
+                        // For unions, collect all member type names
                         let mut tags: Vec<String> =
                             type_info.args.iter().map(|arg| arg.name.clone()).collect();
                         tags.push(type_info.name.clone());
+
+                        // Also add lowercase versions to handle case-insensitive matching
+                        let lowercase_tags: Vec<String> =
+                            tags.iter().map(|s| s.to_lowercase()).collect();
+                        tags.extend(lowercase_tags);
+                        tags.sort();
+                        tags.dedup();
                         tags
                     }
-                    _ => vec![type_info.name.clone()],
+                    _ => {
+                        // For non-union types, include both original and lowercase versions
+                        let mut tags = vec![type_info.name.clone()];
+                        let lowercase = type_info.name.to_lowercase();
+                        if lowercase != type_info.name {
+                            tags.push(lowercase);
+                        }
+                        tags
+                    }
                 };
                 debug!("[PyParser::new] wanted_tags: {:?}", wanted_tags);
                 let parser = TypedStreamParser::with_type(type_info, wanted_tags, ignored_tags);
@@ -846,7 +871,12 @@ impl PyParser {
             type_info.py_type = Some(pydantic_model.into_py(py));
         }
 
-        let wanted_tags = vec![type_info.name.clone()];
+        // Include both original and lowercase versions for case-insensitive matching
+        let mut wanted_tags = vec![type_info.name.clone()];
+        let lowercase = type_info.name.to_lowercase();
+        if lowercase != type_info.name {
+            wanted_tags.push(lowercase);
+        }
         let typed_stream_parser = TypedStreamParser::with_type(type_info, wanted_tags, Vec::new());
 
         Ok(Self {
