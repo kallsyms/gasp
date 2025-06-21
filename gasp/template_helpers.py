@@ -345,13 +345,24 @@ def _format_list_type(list_type: Type, tag_name: str, structure_examples: Dict[s
         return f'<{tag_name} type="list">\n    <item>...</item>\n    ...\n</{tag_name}>'
         
     item_type = args[0]
-    item_type_name = _get_type_name(item_type)
+    
+    # Check if item_type is a type alias that resolves to a Union
+    actual_item_type = item_type
+    if hasattr(item_type, '__value__'):
+        actual_item_type = item_type.__value__
+    
+    # Get the type name - use the resolved type for type aliases
+    item_type_name = _get_type_name(actual_item_type)
     
     # Special handling for List[Union[...]]
-    origin = get_origin(item_type)
-    if origin is Union:
+    origin = get_origin(actual_item_type)
+    # Also check for UnionType (Python 3.10+ X | Y syntax)
+    if origin is Union or type(actual_item_type).__name__ == 'UnionType':
         # For lists of union types, we need to handle each union member
-        union_args = get_args(item_type)
+        if type(actual_item_type).__name__ == 'UnionType':
+            union_args = actual_item_type.__args__
+        else:
+            union_args = get_args(actual_item_type)
         
         # Add structure examples for each union member that is a class
         for arg in union_args:
@@ -481,6 +492,12 @@ def _get_type_name(type_obj: Type) -> str:
     if hasattr(type_obj, '__value__'):
         # For type aliases, still use the underlying type name for type attributes
         type_obj = type_obj.__value__
+    
+    # Also check for UnionType (Python 3.10+ X | Y syntax)
+    if type(type_obj).__name__ == 'UnionType':
+        args = type_obj.__args__
+        type_names = [_get_type_name(arg) for arg in args if arg is not type(None)]
+        return " | ".join(type_names)
     
     origin = get_origin(type_obj)
     
@@ -620,6 +637,10 @@ def interpolate_prompt(template: str, type_obj: Any, format_tag: str = "return_t
     
     if placeholder not in template:
         return template
+
+    print("++$#$#$#$+$+$+#$+#$+#$+#") 
+    print(type_obj)
+    print("++$#$#$#$+$+$+#$+#$+#$+#") 
     
     instructions = type_to_format_instructions(type_obj, name=name)
     

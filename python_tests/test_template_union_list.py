@@ -86,3 +86,42 @@ def test_nested_dict_in_list():
     # Dict items should use correct format
     assert '<item key=' in instructions
     assert '<key' not in instructions
+
+
+# Define type alias using type statement
+type AgentAction = Chat | IssueForm | WaitForConfirmation
+
+
+def test_type_alias_with_type_statement():
+    """Test that 'type X = Union[...]' syntax generates correct format"""
+    
+    # Debug: Let's see what the type looks like
+    from typing import get_origin, get_args
+    print(f"\n=== Debug type alias ===")
+    print(f"AgentAction: {AgentAction}")
+    print(f"type(AgentAction): {type(AgentAction)}")
+    print(f"hasattr __value__: {hasattr(AgentAction, '__value__')}")
+    if hasattr(AgentAction, '__value__'):
+        print(f"AgentAction.__value__: {AgentAction.__value__}")
+    print(f"List[AgentAction]: {List[AgentAction]}")
+    list_args = get_args(List[AgentAction])
+    print(f"get_args(List[AgentAction]): {list_args}")
+    if list_args:
+        print(f"list_args[0]: {list_args[0]}")
+        print(f"type(list_args[0]): {type(list_args[0])}")
+        print(f"hasattr __value__: {hasattr(list_args[0], '__value__')}")
+    
+    # Test the List[AgentAction] format
+    instructions = type_to_format_instructions(List[AgentAction])
+    
+    print(f"\n=== Generated instructions ===")
+    print(instructions)
+    print("=== End instructions ===\n")
+    
+    # The type alias should be resolved to show the union members
+    assert "When you see 'IssueForm' in a type attribute" in instructions
+    assert "When you see 'WaitForConfirmation' in a type attribute" in instructions
+    assert "When you see 'Chat' in a type attribute" in instructions
+    
+    # Check the list type attribute - it should show the expanded union
+    assert 'type="list[Chat | IssueForm | WaitForConfirmation]"' in instructions
