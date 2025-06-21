@@ -256,7 +256,7 @@ def _generate_class_structure_example(cls: Type) -> str:
     class_name = getattr(cls, "__name__", "Object")
     
     if not hints:
-        return f"<{class_name} type=\"{class_name}\">\n</{class_name}>"
+        return f"<{class_name}>\n</{class_name}>"
     
     fields = []
     for field_name, field_type in hints.items():
@@ -280,7 +280,7 @@ def _generate_class_structure_example(cls: Type) -> str:
         fields.append(f'    <{field_name} type="{type_attr}">{example_value}</{field_name}>')
     
     fields_str = "\n".join(fields)
-    return f"<{class_name} type=\"{class_name}\">\n{fields_str}\n</{class_name}>"
+    return f"<{class_name}>\n{fields_str}\n</{class_name}>"
 
 def _format_union_type_from_args(args: Tuple[Type, ...], tag_name: str, structure_examples: Dict[str, str]) -> str:
     """Format instructions for a Union type from args tuple."""
