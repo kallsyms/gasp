@@ -17,6 +17,7 @@ enum StackFrame {
         entries: Vec<(PyObject, PyObject)>,
         key_type: Option<PyTypeInfo>,
         value_type: Option<PyTypeInfo>,
+        current_key: Option<PyObject>,
     },
     Set {
         tag_name: String,
@@ -169,6 +170,7 @@ impl TypedStreamParser {
                     entries: Vec::new(),
                     key_type,
                     value_type,
+                    current_key: None,
                 }))
             }
             crate::python_types::PyTypeKind::Set => {
@@ -229,6 +231,27 @@ impl TypedStreamParser {
         Ok(())
     }
 
+    fn create_type_info_from_string(&self, type_str: &str) -> PyResult<PyTypeInfo> {
+        let (kind, name) = match type_str {
+            "int" => (crate::python_types::PyTypeKind::Integer, "int"),
+            "str" | "string" => (crate::python_types::PyTypeKind::String, "str"),
+            "float" => (crate::python_types::PyTypeKind::Float, "float"),
+            "bool" | "boolean" => (crate::python_types::PyTypeKind::Boolean, "bool"),
+            "list" => (crate::python_types::PyTypeKind::List, "list"),
+            "dict" => (crate::python_types::PyTypeKind::Dict, "dict"),
+            "set" => (crate::python_types::PyTypeKind::Set, "set"),
+            "tuple" => (crate::python_types::PyTypeKind::Tuple, "tuple"),
+            _ => {
+                // Default to string for unknown types
+                (crate::python_types::PyTypeKind::String, "str")
+            }
+        };
+
+        let type_info = PyTypeInfo::new(kind, name.to_string()).with_module("builtins".to_string());
+
+        Ok(type_info)
+    }
+
     fn build_current_intermediate_state(&self) -> PyResult<Option<PyObject>> {
         if self.stack.is_empty() {
             return Ok(None);
@@ -269,10 +292,35 @@ impl TypedStreamParser {
 
         // Determine what type of frame to create based on the current stack top.
         // This is done by peeking at the stack without a long-lived mutable borrow.
-        let next_type_info = if let Some(frame) = self.stack.last() {
+        let mut next_type_info = if let Some(frame) = self.stack.last() {
             match frame {
                 StackFrame::Object { type_info, .. } => {
                     if let Some(field_info) = type_info.fields.get(tag_name) {
+                        // If the field is Optional, convert it to Union[T, None]
+                        let field_info =
+                            if field_info.kind == crate::python_types::PyTypeKind::Optional {
+                                // Convert Optional[T] to Union[T, None]
+                                let inner_type = field_info
+                                    .args
+                                    .get(0)
+                                    .cloned()
+                                    .unwrap_or_else(|| PyTypeInfo::any());
+                                let none_type = PyTypeInfo::new(
+                                    crate::python_types::PyTypeKind::None,
+                                    "None".to_string(),
+                                )
+                                .with_module("builtins".to_string());
+
+                                PyTypeInfo::new(
+                                    crate::python_types::PyTypeKind::Union,
+                                    "Union".to_string(),
+                                )
+                                .with_module("typing".to_string())
+                                .with_args(vec![inner_type, none_type])
+                            } else {
+                                field_info.clone()
+                            };
+
                         // If the field is a union type, check the type attribute
                         if field_info.kind == crate::python_types::PyTypeKind::Union {
                             if let Some(type_attr) = tag.attributes.get("type") {
@@ -281,12 +329,12 @@ impl TypedStreamParser {
                                     .iter()
                                     .find(|t| &t.name == type_attr)
                                     .cloned()
-                                    .or(Some(field_info.clone()))
+                                    .or(Some(field_info))
                             } else {
-                                Some(field_info.clone())
+                                Some(field_info)
                             }
                         } else {
-                            Some(field_info.clone())
+                            Some(field_info)
                         }
                     } else if type_info.kind == crate::python_types::PyTypeKind::Union {
                         type_info.args.iter().find(|t| t.name == *tag_name).cloned()
@@ -327,7 +375,16 @@ impl TypedStreamParser {
                     }
                 }
                 StackFrame::Tuple { items, types, .. } if tag_name == "item" => {
-                    types.get(items.len()).cloned()
+                    // Check if this is a homogeneous tuple (Tuple[T, ...])
+                    if types.len() == 2
+                        && types.get(1).map(|t| t.name == "Ellipsis").unwrap_or(false)
+                    {
+                        // For homogeneous tuples, always use the first type
+                        types.get(0).cloned()
+                    } else {
+                        // For fixed tuples, get the type for the current position
+                        types.get(items.len()).cloned()
+                    }
                 }
                 StackFrame::Dict { value_type, .. } if tag_name == "item" => value_type.clone(),
                 _ => None,
@@ -336,6 +393,22 @@ impl TypedStreamParser {
             // Stack is empty, this is the root.
             self.type_info.clone()
         };
+
+        // If we don't have type info or the type is Any, and we're handling an item in a container,
+        // check if the tag has a type attribute we can use
+        if tag_name == "item" && !self.stack.is_empty() {
+            if next_type_info.is_none()
+                || (next_type_info
+                    .as_ref()
+                    .map(|t| t.kind == crate::python_types::PyTypeKind::Any)
+                    .unwrap_or(false))
+            {
+                if let Some(type_attr) = tag.attributes.get("type") {
+                    // Create PyTypeInfo based on the type attribute
+                    next_type_info = Some(self.create_type_info_from_string(type_attr)?);
+                }
+            }
+        }
 
         let mut pushed_new_frame = false;
         if let Some(type_info) = next_type_info {
@@ -394,12 +467,22 @@ impl TypedStreamParser {
         }
 
         // If we pushed a new frame, the previous frame on the stack might be an Object
-        // that needs its `current_field` updated. This is done after the push to avoid
-        // borrow checker errors.
+        // that needs its `current_field` updated, or a Dict that needs the key stored.
         if pushed_new_frame && self.stack.len() > 1 {
             let len = self.stack.len() - 2;
-            if let Some(StackFrame::Object { current_field, .. }) = self.stack.get_mut(len) {
-                *current_field = Some(tag_name.clone());
+            match self.stack.get_mut(len) {
+                Some(StackFrame::Object { current_field, .. }) => {
+                    *current_field = Some(tag_name.clone());
+                }
+                Some(StackFrame::Dict { current_key, .. }) if tag_name == "item" => {
+                    // For dict items, store the key from the tag attributes
+                    if let Some(key_attr) = tag.attributes.get("key") {
+                        pyo3::Python::with_gil(|py| {
+                            *current_key = Some(key_attr.clone().into_py(py));
+                        });
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -457,6 +540,18 @@ impl TypedStreamParser {
                     StackFrame::List { items, .. } => items.push(obj),
                     StackFrame::Set { items, .. } => items.push(obj),
                     StackFrame::Tuple { items, .. } => items.push(obj),
+                    StackFrame::Dict {
+                        entries,
+                        current_key,
+                        ..
+                    } => {
+                        // For dict items, use the current_key that was stored when the item was opened
+                        if let Some(key) = current_key.take() {
+                            entries.push((key, obj));
+                        } else {
+                            debug!("Dict item closed but no key was stored");
+                        }
+                    }
                     StackFrame::Object {
                         instance,
                         current_field,

@@ -1,48 +1,53 @@
-# Memory File: Stack-Based Parser Refactor
+# Container Type Fixes - Complete
 
-## Current State
+## Summary
+Successfully fixed all container type issues. All 10 tests in test_container_types.py are now passing.
 
-Significant progress has been made on the stack-based parser refactor. The following key issues have been resolved:
+## Key Fixes Made:
 
-1. **Tag Filtering**: Fixed the `TagFinder` to properly emit nested tags as tag events instead of raw bytes, allowing the parser to correctly handle object fields.
-2. **Union Type Handling**: Enhanced the parser to use the `type` attribute on tags to determine which union member to instantiate for lists, sets, and object fields.
-3. **List Item Parsing**: Fixed the issue where only the first item in a list was being returned by properly handling `</item>` closing tags for objects inside containers.
-4. **Streaming Scalar Types**: Fixed incremental parsing for primitive types (str, int, float, bool) to return partial results as content is streamed.
+### 1. Plain Tuple Type Recognition
+- **Issue**: Plain `tuple` (without type parameters) was not being recognized as PyTypeKind::Tuple
+- **Fix**: Modified PyTypeInfo::extract_from_python to check if the type name is "tuple" and set PyTypeKind::Tuple accordingly
 
-## Test Results
+### 2. Homogeneous Tuple Support (Tuple[int, ...])
+- **Issue**: Ellipsis in homogeneous tuples was being treated as a type, causing "Cannot create frame for primitive type Any" error
+- **Fix**: Added special handling in handle_stack_tag_open to detect when the second type argument is "Ellipsis" and always use the first type for all items
 
-### Priority Test Files Status:
-1. **`test_tag_filtering.py`**: ✅ All 8 tests passing
-2. **`test_type_support_summary.py`**: ✅ All 6 tests passing  
-3. **`test_incremental_coercion.py`**: 4/5 tests passing
-   - The only failure is due to HTML entity encoding (`&amp;` vs `&`)
-4. **`test_scalar_parsing.py`**: ✅ All 9 tests passing (including streaming)
+### 3. Nested Container Support (Tuple[list, list])
+- **Issue**: Plain types like `list` without parameters default to Any, which cannot create frames
+- **Fix**: Extended the type attribute checking to also apply when the type is Any, and added container type recognition in create_type_info_from_string
 
-## Key Changes Made
+### 4. Dict Item Handling
+- **Issue**: Dict items weren't being added to the dict's entries - the key attribute wasn't being captured
+- **Fix**: 
+  - Added current_key field to Dict StackFrame
+  - Capture the key attribute when opening dict items
+  - Use the stored key when closing dict items to create key-value pairs
 
-### tag_finder.rs
-- Modified to emit nested tags inside wanted tags as proper `TagEvent::Open` and `TagEvent::Close` events
-- This ensures the parser can see and handle object fields correctly
+## Code Changes:
 
-### parser.rs
-- Enhanced `handle_stack_tag_open` to check the `type` attribute when dealing with Union types
-- Fixed `handle_stack_tag_close` to handle `</item>` tags that close objects inside containers
-- Properly extracts the actual type from unions based on the `type` attribute
-- Fixed primitive type handling to return incremental results during streaming:
-  - Added partial result building for primitive types
-  - Ensured the parser returns accumulated content as it's received
-  - This enables true streaming functionality where results are available before the closing tag
+### src/python_types.rs
+- Fixed extract_from_python to properly recognize plain tuple type
 
-## Remaining Issues
+### src/parser.rs
+- Fixed homogeneous tuple handling by checking for Ellipsis
+- Extended type attribute checking to handle Any types
+- Added container types to create_type_info_from_string
+- Implemented proper dict key handling with current_key field
 
-1. **HTML Entity Decoding**: The parser already decodes HTML entities for strings in `frame_to_pyobject`, but there may be edge cases.
-2. **Compiler Warnings**: Various unused variables and functions that should be cleaned up once the refactor is complete.
+## Test Results:
+All tests in python_tests/test_container_types.py are passing:
+- test_basic_tuple ✓
+- test_typed_tuples ✓
+- test_nested_tuples ✓
+- test_tuple_with_objects ✓
+- test_streaming_tuple ✓
+- test_tuple_vs_list ✓
+- test_dict_support ✓
+- test_set_support ✓
+- test_dict_with_different_formats ✓
+- test_set_with_different_formats ✓
 
-## Next Steps
-
-1. **Run Full Test Suite**: Now that the priority tests and scalar parsing are passing, run the full test suite to identify any remaining issues.
-2. **Fix Edge Cases**: Address any remaining test failures in the full test suite.
-3. **Code Cleanup**: Remove unused functions and fix compiler warnings.
-4. **Performance Testing**: Ensure the new stack-based parser performs well with large inputs.
-
-The parser refactor is now largely functional for the core use cases involving lists, unions, nested objects, and streaming primitives. The incremental parsing capability - the core value of this parser - is working correctly.
+## Next Steps:
+- Check if there are any other failing tests in the test suite
+- Consider running the full test suite to ensure no regressions
