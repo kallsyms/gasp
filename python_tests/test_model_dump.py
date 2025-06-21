@@ -74,7 +74,7 @@ def test_model_dump_with_none_values():
         age: int = 0
     
     child = OptionalChild.__gasp_from_partial__({"name": "Test"})
-    dumped = child.model_dump()
+    dumped = child.model_dump(exclude_none=False)
     
     assert dumped == {"name": "Test", "nickname": None, "age": 0}
 
@@ -186,7 +186,7 @@ def test_model_dump_preserves_types():
         "none_val": None
     })
     
-    dumped = obj.model_dump()
+    dumped = obj.model_dump(exclude_none=False)
     
     assert isinstance(dumped["string_val"], str)
     assert isinstance(dumped["int_val"], int)
