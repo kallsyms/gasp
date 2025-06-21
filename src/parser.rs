@@ -287,8 +287,50 @@ impl TypedStreamParser {
         self.frame_to_pyobject(temp_stack[0].clone()).map(Some)
     }
 
+    fn is_inside_container(&self) -> bool {
+        // Check if the current context is directly inside a container (List, Set, Tuple, or Dict)
+        if let Some(frame) = self.stack.last() {
+            matches!(
+                frame,
+                StackFrame::List { .. }
+                    | StackFrame::Set { .. }
+                    | StackFrame::Tuple { .. }
+                    | StackFrame::Dict { .. }
+            )
+        } else {
+            false
+        }
+    }
+
     fn handle_stack_tag_open(&mut self, tag: &Tag) -> PyResult<()> {
         let tag_name = &tag.name;
+        debug!(
+            "handle_stack_tag_open: tag_name={}, stack_len={}",
+            tag_name,
+            self.stack.len()
+        );
+
+        // Debug: print current stack state
+        for (i, frame) in self.stack.iter().enumerate() {
+            match frame {
+                StackFrame::Object {
+                    type_info,
+                    current_field,
+                    ..
+                } => {
+                    debug!(
+                        "  Stack[{}]: Object(type={}, current_field={:?})",
+                        i, type_info.name, current_field
+                    );
+                }
+                StackFrame::Field { name, .. } => {
+                    debug!("  Stack[{}]: Field(name={})", i, name);
+                }
+                _ => {
+                    debug!("  Stack[{}]: {:?}", i, frame);
+                }
+            }
+        }
 
         // Determine what type of frame to create based on the current stack top.
         // This is done by peeking at the stack without a long-lived mutable borrow.
@@ -396,7 +438,7 @@ impl TypedStreamParser {
 
         // If we don't have type info or the type is Any, and we're handling an item in a container,
         // check if the tag has a type attribute we can use
-        if tag_name == "item" && !self.stack.is_empty() {
+        if tag_name == "item" && self.is_inside_container() {
             if next_type_info.is_none()
                 || (next_type_info
                     .as_ref()
@@ -466,13 +508,24 @@ impl TypedStreamParser {
             }
         }
 
-        // If we pushed a new frame, the previous frame on the stack might be an Object
-        // that needs its `current_field` updated, or a Dict that needs the key stored.
+        // If we pushed a new frame, we need to update the parent frame's context
         if pushed_new_frame && self.stack.len() > 1 {
-            let len = self.stack.len() - 2;
-            match self.stack.get_mut(len) {
-                Some(StackFrame::Object { current_field, .. }) => {
-                    *current_field = Some(tag_name.clone());
+            // Look at the frame right before the one we just pushed (the parent)
+            let parent_idx = self.stack.len() - 2;
+            match self.stack.get_mut(parent_idx) {
+                Some(StackFrame::Object {
+                    current_field,
+                    type_info,
+                    ..
+                }) => {
+                    // Only set current_field if this tag corresponds to a field of the object
+                    if type_info.fields.contains_key(tag_name) {
+                        debug!(
+                            "Setting current_field '{}' on Object frame at index {}",
+                            tag_name, parent_idx
+                        );
+                        *current_field = Some(tag_name.clone());
+                    }
                 }
                 Some(StackFrame::Dict { current_key, .. }) if tag_name == "item" => {
                     // For dict items, store the key from the tag attributes
@@ -491,6 +544,30 @@ impl TypedStreamParser {
 
     fn handle_stack_tag_close(&mut self, tag_name: &str) -> PyResult<()> {
         debug!("handle_stack_tag_close: tag_name={}", tag_name);
+
+        // Debug: print current stack state before processing
+        debug!("Stack state before processing close tag:");
+        for (i, frame) in self.stack.iter().enumerate() {
+            match frame {
+                StackFrame::Object {
+                    type_info,
+                    current_field,
+                    ..
+                } => {
+                    debug!(
+                        "  Stack[{}]: Object(type={}, current_field={:?})",
+                        i, type_info.name, current_field
+                    );
+                }
+                StackFrame::Field { name, .. } => {
+                    debug!("  Stack[{}]: Field(name={})", i, name);
+                }
+                _ => {
+                    debug!("  Stack[{}]: {:?}", i, frame);
+                }
+            }
+        }
+
         let mut child_object = None;
 
         // Check if the closing tag matches the top of the stack.
@@ -499,16 +576,19 @@ impl TypedStreamParser {
                 StackFrame::Field { name, .. } => name == tag_name,
                 StackFrame::Object { type_info, .. } => {
                     // For objects, check if the tag matches the type name
-                    // OR if this is an item closing tag and we're inside a container
+                    // OR if this is a field closing tag and the parent has that field
                     &type_info.name == tag_name
-                        || (tag_name == "item"
-                            && self.stack.len() > 1
-                            && matches!(
-                                self.stack[self.stack.len() - 2],
+                        || (self.stack.len() > 1
+                            && match &self.stack[self.stack.len() - 2] {
+                                StackFrame::Object {
+                                    type_info: parent_type,
+                                    ..
+                                } => parent_type.fields.contains_key(tag_name),
                                 StackFrame::List { .. }
-                                    | StackFrame::Set { .. }
-                                    | StackFrame::Tuple { .. }
-                            ))
+                                | StackFrame::Set { .. }
+                                | StackFrame::Tuple { .. } => tag_name == "item",
+                                _ => false,
+                            })
                 }
                 StackFrame::List {
                     tag_name: list_tag, ..
