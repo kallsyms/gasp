@@ -298,8 +298,8 @@ def _format_union_type_from_args(args: Tuple[Type, ...], tag_name: str, structur
         arg_name = getattr(arg, "__name__", f"Type{i+1}")
         
         if _is_class_type(arg):
-            # For class types, show the tag with type attribute
-            option_text = f"// Option {i+1}:\n<{arg_name} type=\"{arg_name}\">\n    ...{arg_name} fields...\n</{arg_name}>"
+            # For class types, show the tag WITHOUT type attribute (union members don't use type)
+            option_text = f"// Option {i+1}:\n<{arg_name}>\n    ...{arg_name} fields...\n</{arg_name}>"
             
             # Add the type to structure examples
             if arg_name not in structure_examples:
