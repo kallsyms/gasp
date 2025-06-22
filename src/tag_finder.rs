@@ -136,14 +136,77 @@ impl TagFinder {
             let tag_body = &self.buf[lt + 1..gt]; // without '<' / '>'
             let is_close = tag_body.starts_with('/');
             let name_part = if is_close { &tag_body[1..] } else { tag_body };
-            let mut parts = name_part.split_whitespace();
-            let name = parts.next().unwrap_or("").to_owned();
+
+            // Find the first whitespace to separate tag name from attributes
+            let (name, attr_part) = match name_part.find(char::is_whitespace) {
+                Some(idx) => {
+                    let (n, a) = name_part.split_at(idx);
+                    (n.to_owned(), a.trim())
+                }
+                None => (name_part.to_owned(), ""),
+            };
             let name_lower = name.to_lowercase();
 
+            // Parse attributes properly, handling quoted values with spaces
             let mut attributes = HashMap::new();
-            while let Some(part) = parts.next() {
-                if let Some((key, value)) = part.split_once('=') {
-                    attributes.insert(key.to_string(), value.trim_matches('"').to_string());
+            let mut remaining = attr_part;
+
+            while !remaining.is_empty() {
+                // Skip whitespace
+                remaining = remaining.trim_start();
+                if remaining.is_empty() {
+                    break;
+                }
+
+                // Find the equals sign
+                if let Some(eq_pos) = remaining.find('=') {
+                    let key = remaining[..eq_pos].trim().to_string();
+                    remaining = &remaining[eq_pos + 1..].trim_start();
+
+                    // Parse the value (handle quoted strings)
+                    let value = if remaining.starts_with('"') {
+                        // Find closing quote
+                        remaining = &remaining[1..]; // Skip opening quote
+                        if let Some(close_quote) = remaining.find('"') {
+                            let val = remaining[..close_quote].to_string();
+                            remaining = &remaining[close_quote + 1..];
+                            val
+                        } else {
+                            // Malformed attribute, take rest as value
+                            let val = remaining.to_string();
+                            remaining = "";
+                            val
+                        }
+                    } else if remaining.starts_with('\'') {
+                        // Handle single quotes too
+                        remaining = &remaining[1..]; // Skip opening quote
+                        if let Some(close_quote) = remaining.find('\'') {
+                            let val = remaining[..close_quote].to_string();
+                            remaining = &remaining[close_quote + 1..];
+                            val
+                        } else {
+                            // Malformed attribute, take rest as value
+                            let val = remaining.to_string();
+                            remaining = "";
+                            val
+                        }
+                    } else {
+                        // Unquoted value, read until whitespace
+                        let end = remaining
+                            .find(char::is_whitespace)
+                            .unwrap_or(remaining.len());
+                        let val = remaining[..end].to_string();
+                        remaining = &remaining[end..];
+                        val
+                    };
+
+                    attributes.insert(key, value);
+                } else {
+                    // No equals sign found, skip this token
+                    let end = remaining
+                        .find(char::is_whitespace)
+                        .unwrap_or(remaining.len());
+                    remaining = &remaining[end..];
                 }
             }
 
@@ -180,6 +243,16 @@ impl TagFinder {
                     self.inside_ignored = true;
                     self.ignored_depth += 1;
                     debug!("[TagFinder::push] Opened ignored tag '{}'. inside_ignored={}, ignored_depth={}", name, self.inside_ignored, self.ignored_depth);
+                } else if self.inside && !self.inside_ignored {
+                    // If we're inside a wanted tag, emit ALL nested tags (regardless of whether they're in the wanted list)
+                    debug!(
+                        "[TagFinder::push] Emitting Open for nested tag inside wanted tag: '{}'",
+                        name
+                    );
+                    emit(TagEvent::Open(Tag {
+                        name: name.clone(),
+                        attributes,
+                    }))?;
                 } else if is_wanted && !self.inside_ignored {
                     debug!("[TagFinder::push] Emitting Open for wanted tag: '{}'", name);
                     emit(TagEvent::Open(Tag {
@@ -198,16 +271,6 @@ impl TagFinder {
                             name
                         );
                     }
-                } else if self.inside && !self.inside_ignored && !is_ignored {
-                    // Emit nested tags inside wanted tags as proper tag events
-                    debug!(
-                        "[TagFinder::push] Emitting Open for nested tag inside wanted tag: '{}'",
-                        name
-                    );
-                    emit(TagEvent::Open(Tag {
-                        name: name.clone(),
-                        attributes,
-                    }))?;
                 } else {
                     debug!("[TagFinder::push] Open Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
                 }
@@ -220,6 +283,21 @@ impl TagFinder {
                         self.inside_ignored = false;
                     }
                     debug!("[TagFinder::push] Closed ignored tag '{}'. inside_ignored={}, ignored_depth={}", name, self.inside_ignored, self.ignored_depth);
+                } else if self.inside && !self.inside_ignored {
+                    // If we're inside a wanted tag, emit ALL nested closing tags
+                    debug!(
+                        "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
+                        name
+                    );
+                    emit(TagEvent::Close(name.clone()))?;
+                    // Only set inside=false if this is closing the main wanted tag
+                    if is_wanted {
+                        self.inside = false;
+                        debug!(
+                            "[TagFinder::push] Set self.inside = false for wanted tag '{}'",
+                            name
+                        );
+                    }
                 } else if is_wanted && !self.inside_ignored {
                     debug!(
                         "[TagFinder::push] Emitting Close for wanted tag: '{}'",
@@ -231,13 +309,6 @@ impl TagFinder {
                         "[TagFinder::push] Set self.inside = false for tag '{}'",
                         name
                     );
-                } else if self.inside && !self.inside_ignored && !is_ignored {
-                    // Emit nested tags inside wanted tags as proper tag events
-                    debug!(
-                        "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
-                        name
-                    );
-                    emit(TagEvent::Close(name.clone()))?;
                 } else {
                     debug!("[TagFinder::push] Close Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
                 }

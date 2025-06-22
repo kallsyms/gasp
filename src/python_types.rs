@@ -103,6 +103,16 @@ impl PyTypeInfo {
         )
     }
 
+    /// Check if this is a Union type that contains only primitive types
+    pub fn is_primitive_union(&self) -> bool {
+        if self.kind != PyTypeKind::Union {
+            return false;
+        }
+
+        // Check if all union members are primitives
+        self.args.iter().all(|arg| arg.is_primitive())
+    }
+
     /// Check if a XmlValue matches this type
     pub fn matches(&self, value: &XmlValue) -> bool {
         match (&self.kind, value) {
@@ -932,35 +942,9 @@ pub fn create_instance_from_xml(
                     if let Some(inner_type) = field_info.args.get(0) {
                         debug!("Optional inner type: {:?}", inner_type.name);
 
-                        // Special handling for Optional[List[...]]
-                        if inner_type.kind == PyTypeKind::List {
-                            // For lists, we need to parse the children as list items
-                            let py_list = PyList::empty(py);
-                            let element_type = inner_type.args.get(0);
-
-                            for grand_child in grand_children {
-                                if let XmlValue::Element(item_name, item_attrs, item_children) =
-                                    grand_child
-                                {
-                                    if item_name == "item" && item_children.len() == 1 {
-                                        if let Some(XmlValue::Text(text)) = item_children.get(0) {
-                                            let py_value = xml_to_python(
-                                                py,
-                                                &XmlValue::Text(text.clone()),
-                                                element_type,
-                                            )?;
-                                            py_list.append(py_value)?;
-                                        }
-                                    }
-                                }
-                            }
-
-                            instance.setattr(child_name.as_str(), py_list)?;
-                        } else {
-                            // For other Optional types, parse normally
-                            let py_value = xml_to_python(py, child, Some(inner_type))?;
-                            instance.setattr(child_name.as_str(), py_value)?;
-                        }
+                        // Use xml_to_python which handles all types properly including lists
+                        let py_value = xml_to_python(py, child, Some(inner_type))?;
+                        instance.setattr(child_name.as_str(), py_value)?;
                     } else {
                         // Fallback to generic parsing
                         let py_value = xml_to_python(py, child, Some(field_info))?;
@@ -1627,7 +1611,21 @@ pub fn create_instance_from_xml_events(
     if let XmlValue::Element(tag_name, attrs, children) = xml_value {
         if tag_name == type_info.name {
             // Create instance
-            let instance = type_info.py_type.as_ref().unwrap().as_ref(py).call0()?;
+            let py_type = type_info.py_type.as_ref().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot instantiate class without py_type",
+                )
+            })?;
+
+            // Check if the type has __gasp_from_partial__ method
+            let instance = if py_type.as_ref(py).hasattr("__gasp_from_partial__")? {
+                let empty_dict = pyo3::types::PyDict::new(py);
+                py_type
+                    .as_ref(py)
+                    .call_method1("__gasp_from_partial__", (empty_dict,))?
+            } else {
+                py_type.as_ref(py).call0()?
+            };
 
             // Set attributes
             for (k, v) in &attrs {

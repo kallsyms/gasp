@@ -189,6 +189,28 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
                 type_attr = _get_xml_type_attr(non_none_type)
                 example_value = _get_example_value(non_none_type)
                 field_format = f'{comment}<{field_name} type="{type_attr}">{example_value}</{field_name}> (optional)'
+                
+                # Also check if the non-none type contains nested classes
+                non_none_origin = get_origin(non_none_type)
+                if non_none_origin is list:
+                    list_args = get_args(non_none_type)
+                    if list_args and _is_class_type(list_args[0]):
+                        item_type = list_args[0]
+                        item_class_name = getattr(item_type, "__name__", "Object")
+                        if item_class_name not in structure_examples:
+                            structure_examples[item_class_name] = _generate_class_structure_example(item_type)
+                elif non_none_origin is dict:
+                    dict_args = get_args(non_none_type)
+                    if len(dict_args) == 2 and _is_class_type(dict_args[1]):
+                        value_type = dict_args[1]
+                        value_class_name = getattr(value_type, "__name__", "Object")
+                        if value_class_name not in structure_examples:
+                            structure_examples[value_class_name] = _generate_class_structure_example(value_type)
+                elif _is_class_type(non_none_type):
+                    # Direct optional class type
+                    class_name = getattr(non_none_type, "__name__", "Object")
+                    if class_name not in structure_examples:
+                        structure_examples[class_name] = _generate_class_structure_example(non_none_type)
             else:
                 field_format = f'{comment}<{field_name}>{example_value}</{field_name}>'
         else:
@@ -528,6 +550,11 @@ def _get_type_name(type_obj: Type) -> str:
         return "set"
     elif origin is Union:
         args = get_args(type_obj)
+        # Special handling for Optional (Union with None)
+        if type(None) in args and len(args) == 2:
+            non_none_type = next(arg for arg in args if arg is not type(None))
+            return f"Optional[{_get_type_name(non_none_type)}]"
+        # For other unions, exclude None
         type_names = [_get_type_name(arg) for arg in args if arg is not type(None)]
         return " | ".join(type_names)
     

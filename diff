@@ -1,0 +1,2002 @@
+diff --git a/debug_field_type_attribute.py b/debug_field_type_attribute.py
+new file mode 100644
+index 0000000..3bc66a7
+--- /dev/null
++++ b/debug_field_type_attribute.py
+@@ -0,0 +1,80 @@
++"""Debug how parser handles field tags with complex type attributes"""
++
++import os
++os.environ['GASP_DEBUG'] = '1'
++
++from typing import List, Union, Optional
++from gasp import Parser, Deserializable
++
++
++class SimpleCase(Deserializable):
++    """Test with a simpler field to isolate the issue"""
++    items: List[str]
++
++
++# First test: simple case with type attribute on field
++xml1 = """<SimpleCase>
++    <items type="list[str]">
++        <item type="str">A</item>
++        <item type="str">B</item>
++    </items>
++</SimpleCase>"""
++
++print("=== Test 1: Simple field with type attribute ===")
++parser1 = Parser(SimpleCase)
++parser1.feed(xml1)
++result1 = parser1.validate()
++print(f"Result: {result1}")
++if result1:
++    print(f"Items: {result1.items}")
++    print(f"Items length: {len(result1.items)}")
++
++
++# Now test the problematic case
++class ComplexCase(Deserializable):
++    """Test with complex nested type"""
++    quarterly_reports: List[Optional[dict[str, Union[float, List[str]]]]]
++
++
++xml2 = """<ComplexCase>
++    <quarterly_reports type="list[Union[dict[str, Union[float, list[str]]], None]]">
++        <item type="dict[str, Union[float, list[str]]]">
++            <item key="revenue" type="float">1500000.0</item>
++            <item key="highlights" type="list[str]">
++                <item type="str">New product launch</item>
++                <item type="str">Exceeded targets</item>
++            </item>
++        </item>
++        <item type="None">None</item>
++    </quarterly_reports>
++</ComplexCase>"""
++
++print("\n\n=== Test 2: Complex field with type attribute ===")
++parser2 = Parser(ComplexCase)
++parser2.feed(xml2)
++result2 = parser2.validate()
++print(f"Result: {result2}")
++if result2:
++    print(f"Quarterly reports: {result2.quarterly_reports}")
++    if result2.quarterly_reports:
++        print(f"Length: {len(result2.quarterly_reports)}")
++
++
++# Test 3: Same structure but without type attribute on field
++xml3 = """<ComplexCase>
++    <quarterly_reports>
++        <item type="dict[str, Union[float, list[str]]]">
++            <item key="revenue" type="float">1500000.0</item>
++        </item>
++    </quarterly_reports>
++</ComplexCase>"""
++
++print("\n\n=== Test 3: Without type attribute on field ===")
++parser3 = Parser(ComplexCase)
++parser3.feed(xml3)
++result3 = parser3.validate()
++print(f"Result: {result3}")
++if result3:
++    print(f"Quarterly reports: {result3.quarterly_reports}")
++    if result3.quarterly_reports:
++        print(f"Length: {len(result3.quarterly_reports)}")
+diff --git a/debug_list_union_parse.py b/debug_list_union_parse.py
+new file mode 100644
+index 0000000..d2212b5
+--- /dev/null
++++ b/debug_list_union_parse.py
+@@ -0,0 +1,73 @@
++"""Debug the list union parsing issue"""
++
++from typing import List, Union, Optional
++from gasp import Parser, Deserializable
++
++
++class IssueForm(Deserializable):
++  provider: str
++  title: str
++  description: str
++  labels: List[str]
++  assignees: List[str]
++  bismuth_assigned: Optional[bool]
++  status: str
++  priority: str
++
++class Chat(Deserializable):
++  content: str
++
++class SaveKnowledge(Deserializable):
++  title: str
++  content: str
++  category: Optional[str]
++  tags: Optional[List[str]]
++  importance: Optional[str]  # "low" | "medium" | "high"
++  context: str
++  source: Optional[str]
++
++class WaitForConfirmation(Deserializable):
++  prompt: str
++
++# Define type alias
++type ActionList = Union[Chat, SaveKnowledge, IssueForm, WaitForConfirmation]
++
++xml = '''
++<List type="list[Chat | SaveKnowledge | IssueForm | WaitForConfirmation]">
++    <item type="Chat">
++        <content type="str">You got it. I'll create that Linear ticket for the frontend bug. Here are the details I've put together:</content>
++    </item>
++    <item type="SaveKnowledge">
++        <title type="str">Frontend Post Bug: Profile Data Missing</title>
++        <content type="str">A ticket needs to be created for a frontend issue where profile data fails to display after making a post.</content>
++        <category type="str">Known Issues</category>
++        <tags type="list[str]">
++            <item type="str">bug</item>
++            <item type="str">frontend</item>
++        </tags>
++        <importance type="str">Medium</importance>
++        <context type="str">The user asked to create a ticket for
++'''
++
++# Try to parse
++parser = Parser(List[ActionList])
++
++# Add debug to trace the issue
++print("Parsing XML with nested list in SaveKnowledge.tags field...")
++print("Expected: List with 2 items - Chat and SaveKnowledge (with tags=['bug', 'frontend'])")
++print()
++
++try:
++    result = parser.feed(xml)
++    print(f"Result: {result}")
++    if result:
++        print(f"Result length: {len(result)}")
++        for i, item in enumerate(result):
++            print(f"  [{i}] {type(item).__name__}: {item}")
++            if hasattr(item, '__dict__'):
++                for k, v in item.__dict__.items():
++                    print(f"      {k}: {v}")
++except Exception as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/debug_parser_flow.py b/debug_parser_flow.py
+new file mode 100644
+index 0000000..aac9d07
+--- /dev/null
++++ b/debug_parser_flow.py
+@@ -0,0 +1,34 @@
++"""Debug parser flow for field tags with type attributes"""
++
++import os
++os.environ['RUST_LOG'] = 'gasp::parser=debug'
++
++from typing import List, Optional
++from gasp import Parser, Deserializable
++
++
++class TestCase(Deserializable):
++    """Test case with optional list field"""
++    items: Optional[List[str]]
++
++
++# Test with type attribute on field tag
++xml = """<TestCase>
++    <items type="list[str]">
++        <item type="str">A</item>
++        <item type="str">B</item>
++    </items>
++</TestCase>"""
++
++print("=== Parsing with type attribute on field ===")
++parser = Parser(TestCase)
++parser.feed(xml)
++result = parser.validate()
++
++if result:
++    print(f"\nResult: {result}")
++    print(f"Items: {result.items}")
++    if result.items:
++        print(f"Items length: {len(result.items)}")
++else:
++    print("No result!")
+diff --git a/debug_quarterly_reports.py b/debug_quarterly_reports.py
+new file mode 100644
+index 0000000..8d8522a
+--- /dev/null
++++ b/debug_quarterly_reports.py
+@@ -0,0 +1,82 @@
++"""Debug quarterly_reports parsing issue"""
++
++import os
++os.environ['GASP_DEBUG'] = '1'
++
++from typing import List, Union, Optional
++from gasp import Parser, Deserializable
++
++
++class Company(Deserializable):
++    """Simplified company with just the problematic field"""
++    name: str
++    quarterly_reports: Optional[List[Optional[dict[str, Union[float, List[str]]]]]]
++
++
++# Test with the exact XML structure from the test
++xml = """<Company>
++    <name type="str">TechCorp</name>
++    <quarterly_reports type="list[Union[dict[str, Union[float, list[str]]], None]]">
++        <item type="dict[str, Union[float, list[str]]]">
++            <item key="revenue" type="float">1500000.0</item>
++            <item key="highlights" type="list[str]">
++                <item type="str">New product launch</item>
++                <item type="str">Exceeded targets</item>
++            </item>
++        </item>
++        <item type="None">None</item>
++    </quarterly_reports>
++</Company>"""
++
++print("=== Parsing quarterly_reports field ===")
++parser = Parser(Company)
++parser.feed(xml)
++
++# Check partial state
++partial = parser.get_partial()
++print(f"\nPartial object: {partial}")
++if partial:
++    print(f"Name: {getattr(partial, 'name', 'NOT SET')}")
++    print(f"Quarterly reports: {getattr(partial, 'quarterly_reports', 'NOT SET')}")
++    if hasattr(partial, 'quarterly_reports') and partial.quarterly_reports is not None:
++        print(f"  Length: {len(partial.quarterly_reports)}")
++        for i, report in enumerate(partial.quarterly_reports):
++            print(f"  Item {i}: {report}")
++
++result = parser.validate()
++print(f"\nValidated result: {result}")
++if result:
++    print(f"Name: {result.name}")
++    print(f"Quarterly reports: {result.quarterly_reports}")
++    if result.quarterly_reports:
++        print(f"  Length: {len(result.quarterly_reports)}")
++        for i, report in enumerate(result.quarterly_reports):
++            print(f"  Item {i}: {report}")
++
++# Now test without the type attribute on the field tag
++xml2 = """<Company>
++    <name type="str">TechCorp</name>
++    <quarterly_reports>
++        <item type="dict[str, Union[float, list[str]]]">
++            <item key="revenue" type="float">1500000.0</item>
++            <item key="highlights" type="list[str]">
++                <item type="str">New product launch</item>
++                <item type="str">Exceeded targets</item>
++            </item>
++        </item>
++        <item type="None">None</item>
++    </quarterly_reports>
++</Company>"""
++
++print("\n\n=== Parsing without type attribute on field tag ===")
++parser2 = Parser(Company)
++parser2.feed(xml2)
++result2 = parser2.validate()
++print(f"\nValidated result: {result2}")
++if result2:
++    print(f"Name: {result2.name}")
++    print(f"Quarterly reports: {result2.quarterly_reports}")
++    if result2.quarterly_reports:
++        print(f"  Length: {len(result2.quarterly_reports)}")
++        for i, report in enumerate(result2.quarterly_reports):
++            print(f"  Item {i}: {report}")
+diff --git a/gasp/gasp.pyi b/gasp/gasp.pyi
+index ec467d0..f54aad2 100644
+--- a/gasp/gasp.pyi
++++ b/gasp/gasp.pyi
+@@ -56,7 +56,7 @@ class Parser(Generic[T]):
+         pass
+     
+     def feed(self, chunk: str) -> Optional[T]:
+-        """Feed a chunk of JSON data and return a partial object if available"""
++        """Feed a chunk of XML data and return a partial object if available"""
+         pass
+     
+     def is_complete(self) -> bool:
+diff --git a/gasp/template_helpers.py b/gasp/template_helpers.py
+index 94467d7..3ccef80 100644
+--- a/gasp/template_helpers.py
++++ b/gasp/template_helpers.py
+@@ -189,6 +189,28 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
+                 type_attr = _get_xml_type_attr(non_none_type)
+                 example_value = _get_example_value(non_none_type)
+                 field_format = f'{comment}<{field_name} type="{type_attr}">{example_value}</{field_name}> (optional)'
++                
++                # Also check if the non-none type contains nested classes
++                non_none_origin = get_origin(non_none_type)
++                if non_none_origin is list:
++                    list_args = get_args(non_none_type)
++                    if list_args and _is_class_type(list_args[0]):
++                        item_type = list_args[0]
++                        item_class_name = getattr(item_type, "__name__", "Object")
++                        if item_class_name not in structure_examples:
++                            structure_examples[item_class_name] = _generate_class_structure_example(item_type)
++                elif non_none_origin is dict:
++                    dict_args = get_args(non_none_type)
++                    if len(dict_args) == 2 and _is_class_type(dict_args[1]):
++                        value_type = dict_args[1]
++                        value_class_name = getattr(value_type, "__name__", "Object")
++                        if value_class_name not in structure_examples:
++                            structure_examples[value_class_name] = _generate_class_structure_example(value_type)
++                elif _is_class_type(non_none_type):
++                    # Direct optional class type
++                    class_name = getattr(non_none_type, "__name__", "Object")
++                    if class_name not in structure_examples:
++                        structure_examples[class_name] = _generate_class_structure_example(non_none_type)
+             else:
+                 field_format = f'{comment}<{field_name}>{example_value}</{field_name}>'
+         else:
+@@ -528,6 +550,11 @@ def _get_type_name(type_obj: Type) -> str:
+         return "set"
+     elif origin is Union:
+         args = get_args(type_obj)
++        # Special handling for Optional (Union with None)
++        if type(None) in args and len(args) == 2:
++            non_none_type = next(arg for arg in args if arg is not type(None))
++            return f"Optional[{_get_type_name(non_none_type)}]"
++        # For other unions, exclude None
+         type_names = [_get_type_name(arg) for arg in args if arg is not type(None)]
+         return " | ".join(type_names)
+     
+diff --git a/memory.md b/memory.md
+deleted file mode 100644
+index d8fe443..0000000
+--- a/memory.md
++++ /dev/null
+@@ -1,196 +0,0 @@
+-# Container Type Fixes - Complete ✅
+-
+-## Summary
+-Successfully fixed all container type issues. All tests are now passing!
+-
+-## Key Fixes Made:
+-
+-### 1. Plain Tuple Type Recognition
+-- **Issue**: Plain `tuple` (without type parameters) was not being recognized as PyTypeKind::Tuple
+-- **Fix**: Modified PyTypeInfo::extract_from_python to check if the type name is "tuple" and set PyTypeKind::Tuple accordingly
+-
+-### 2. Homogeneous Tuple Support (Tuple[int, ...])
+-- **Issue**: Ellipsis in homogeneous tuples was being treated as a type, causing "Cannot create frame for primitive type Any" error
+-- **Fix**: Added special handling in handle_stack_tag_open to detect when the second type argument is "Ellipsis" and always use the first type for all items
+-
+-### 3. Nested Container Support (Tuple[list, list])
+-- **Issue**: Plain types like `list` without parameters default to Any, which cannot create frames
+-- **Fix**: Extended the type attribute checking to also apply when the type is Any, and added container type recognition in create_type_info_from_string
+-
+-### 4. Dict Item Handling
+-- **Issue**: Dict items weren't being added to the dict's entries - the key attribute wasn't being captured
+-- **Fix**: 
+-  - Added current_key field to Dict StackFrame
+-  - Capture the key attribute when opening dict items
+-  - Use the stored key when closing dict items to create key-value pairs
+-
+-### 5. Named Union Type Aliases
+-- **Issue**: Test was expecting `<NamedUnion type="A">` for `type NamedUnion = Union[A, B]`
+-- **Fix**: This was actually a test bug! Named unions should behave exactly like `Union[A, B]` - using member type tags (`<A>`, `<B>`), not the union name. Fixed the test to expect the correct behavior.
+-
+-## Code Changes:
+-
+-### src/python_types.rs
+-- Fixed extract_from_python to properly recognize plain tuple type
+-- Added support for TypeAliasType with __value__ attribute (already implemented correctly)
+-
+-### src/parser.rs
+-- Fixed homogeneous tuple handling by checking for Ellipsis
+-- Extended type attribute checking to handle Any types
+-- Added container types to create_type_info_from_string
+-- Implemented proper dict key handling with current_key field
+-
+-### python_tests/test_union_flow.py
+-- Fixed test_named_union_with_type_attribute to expect `<A>` instead of `<NamedUnion type="A">`
+-
+-## Test Results:
+-All 114 tests are passing! ✅
+-
+-## Lessons Learned:
+-- Named type aliases (`type X = ...`) should behave identically to their underlying types
+-- Union types always use the member type as the XML tag, regardless of whether they're named or anonymous
+-- Container type handling requires careful attention to primitive vs complex types
+-- Dict handling needs special logic to capture and associate keys with values
+-
+----
+-
+-# Template Helpers Update - Complete ✅
+-
+-## Summary
+-Updated the `template_helpers.py` module to generate XML format instructions that properly reflect what the improved parser expects, including mandatory `type=""` and `key=""` attributes.
+-
+-## Key Improvements:
+-
+-### 1. Proper XML Format
+-- **Before**: Generated simplified format like `<tags type="list">`
+-- **After**: Generates complete format with type attributes: `<tags type="list[str]">` with `<item type="str">` inside
+-
+-### 2. Dict Key Attributes
+-- **Before**: Dict items shown as generic `{key: value pairs}`
+-- **After**: Properly shows `<item key="example_key" type="value_type">` format
+-
+-### 3. Union Type Handling
+-- **Before**: Showed union as single tag with options listed
+-- **After**: Shows each union member as separate XML option with proper tags
+-
+-### 4. Structure Examples
+-- **Before**: No detailed structure for complex types
+-- **After**: Provides complete structure examples for all referenced complex types
+-
+-### 5. Clear Instructions
+-- **Before**: Minimal guidance
+-- **After**: Clear IMPORTANT section mandating:
+-  - Use of exact XML tags
+-  - Always include type="" attributes where shown
+-  - Always include key="" for dict items
+-  - No JSON format or code blocks
+-
+-## Example Output:
+-```xml
+-<scores type="dict[str, int]">
+-    <item key="example_key1" type="int">42</item>
+-    <item key="example_key2" type="int">42</item>
+-    ...
+-</scores>
+-```
+-
+-## Files Updated:
+-- `gasp/template_helpers.py` - Complete rewrite with proper XML format generation
+-- `examples/prompt_interpolation_demo.py` - Comprehensive demo showing all type combinations
+-
+-## Impact:
+-LLMs using gasp will now receive much clearer format instructions that match exactly what the parser expects, reducing errors and improving response quality.
+-
+----
+-
+-# Template Helpers Enhancement for List[Union[...]] - Complete ✅
+-
+-## Summary
+-Fixed template helpers to properly generate structure examples for union types within lists, particularly for `List[Union[...]]` patterns.
+-
+-## Key Issues Fixed:
+-
+-### 1. Missing Structure Examples for Union Members
+-- **Issue**: `List[Union[IssueForm, WaitForConfirmation]]` wasn't generating structure examples for the union members
+-- **Fix**: Added special handling in `_format_list_type` to detect `Union` origin and extract structure examples for all class members
+-
+-### 2. Missing Dict Structure in List[dict[...]]
+-- **Issue**: `List[dict[str, IssueForm]]` showed generic `...` instead of explicit dict structure
+-- **Fix**: Enhanced `_format_list_type` to show explicit dict item structure with `<item key="example_key" type="IssueForm">` format
+-
+-## Code Changes:
+-
+-### gasp/template_helpers.py
+-Added special handling for List[Union[...]] and List[dict[...]] in `_format_list_type`:
+-- Detects Union origin and extracts structure examples for all class members
+-- Detects dict origin and shows explicit dict structure with key attributes
+-- Ensures all complex types get their structure examples included
+-
+-### python_tests/test_template_union_list.py
+-Created comprehensive tests for:
+-- Union lists with structure examples
+-- Dict format using `<item key="...">` not `<key>`
+-- Nested dict in list with proper structure
+-- Union lists with primitive types (no structure examples)
+-
+-## Example Improvements:
+-
+-### List[dict[str, IssueForm]]
+-**Before**: Generic placeholder
+-**After**:
+-```xml
+-<List type="list[dict[str, IssueForm]]">
+-    <item type="dict[str, IssueForm]">
+-        <item key="example_key" type="IssueForm">
+-            ...IssueForm fields...
+-        </item>
+-        ...
+-    </item>
+-    ...
+-</List>
+-```
+-
+-### List[Union[Chat, IssueForm, WaitForConfirmation]]
+-Now includes structure examples for all union members!
+-
+-## Impact:
+-LLMs will now receive much clearer instructions for complex nested types, reducing confusion about dict formatting and union member structures.
+-
+----
+-
+-# Empty Class Support - Complete ✅
+-
+-## Summary
+-Verified that GASP fully supports empty Python classes (classes with no fields or type annotations).
+-
+-## Key Findings:
+-
+-### 1. Empty Classes Work Out of the Box
+-- Classes like `class Finalize: pass` parse successfully
+-- No type annotations required
+-- Python automatically creates empty `__annotations__` dict
+-
+-### 2. Both XML Tag Formats Supported
+-- Regular tags: `<Finalize></Finalize>` ✅
+-- Self-closing tags: `<Finalize />` ✅ (with minor quirk: `is_complete()` returns False but instance is created)
+-
+-### 3. Parser Behavior
+-- Recognizes empty classes as `PyTypeKind::Class`
+-- Creates instances using standard Python instantiation (`py_type.call0()`)
+-- Returns empty instance immediately (no fields to populate)
+-
+-## Test Coverage:
+-Created `python_tests/test_empty_classes.py` with tests for:
+-- Basic empty class parsing
+-- Self-closing tag support
+-- Empty classes with docstrings
+-- Incremental parsing behavior
+-- Whitespace handling
+-
+-All tests pass! No code changes were needed - the parser already handles empty classes correctly.
+-
+-## Use Cases:
+-- Marker classes
+-- Base classes for inheritance
+-- Simple data containers that will be populated dynamically
+-- Command/message types that carry meaning in their type alone
+diff --git a/python_tests/test_template_union_list.py b/python_tests/test_template_union_list.py
+index ae5c548..d49cd30 100644
+--- a/python_tests/test_template_union_list.py
++++ b/python_tests/test_template_union_list.py
+@@ -1,22 +1,23 @@
+ """Test template generation for List[Union[...]] types"""
+ 
+ import pytest
+-from typing import List, Union
++from typing import List, Union, Optional
++from gasp import Parser, Deserializable
+ from gasp.template_helpers import type_to_format_instructions
+ 
+ 
+-class IssueForm:
++class IssueForm(Deserializable):
+     """A form for creating GitHub issues"""
+     title: str
+     body: str
+ 
+ 
+-class WaitForConfirmation:
++class WaitForConfirmation(Deserializable):
+     """A confirmation prompt"""
+     prompt: str
+ 
+ 
+-class Chat:
++class Chat(Deserializable):
+     """A chat message"""
+     content: str
+ 
+@@ -92,6 +93,353 @@ def test_nested_dict_in_list():
+ type AgentAction = Chat | IssueForm | WaitForConfirmation
+ 
+ 
++# Torture test classes for deeply nested structures
++class Department(Deserializable):
++    """A department with nested structure"""
++    name: str
++    budget: float
++    
++    
++class Employee(Deserializable):
++    """An employee with various attributes"""
++    name: str
++    id: int
++    email: str
++    department: Department
++    
++
++class Project(Deserializable):
++    """A project with complex nested structure"""
++    title: str
++    description: str
++    team_members: List[Employee]
++    milestones: dict[str, str]
++    
++
++class Company(Deserializable):
++    """Root level company with extreme nesting"""
++    name: str
++    # Mix of optional and non-optional containers
++    departments: List[Department]  # Required list
++    projects: Optional[List[Project]]  # Optional list of projects
++    employee_directory: dict[str, Employee]  # Required dict
++    # Deeply nested: optional dict of lists of tuples
++    regional_data: Optional[dict[str, List[tuple[str, int, Optional[float]]]]]
++    # Set of tags - optional
++    company_tags: Optional[set[str]]
++    # Complex union in a list
++    announcements: List[Union[str, dict[str, Union[str, int]]]]
++    # Nested optional lists
++    quarterly_reports: Optional[List[Optional[dict[str, Union[float, List[str]]]]]]
++    # Tuple with mixed types including optional containers
++    metadata: tuple[str, int, Optional[List[dict[str, Employee]]]]
++    # Super nested: List of dicts containing optional lists of unions
++    initiatives: List[dict[str, Optional[List[Union[Project, Department]]]]]
++
++
++def test_deeply_nested_torture_test():
++    """Test extremely deeply nested structures with mixed optional/non-optional containers"""
++    
++    instructions = type_to_format_instructions(Company)
++    
++    print("\n=== Deeply Nested Torture Test ===")
++    print(instructions)
++    print("=== End ===\n")
++    
++    # Basic structure checks - look for the type names mentioned
++    assert "Company" in instructions
++    assert "name" in instructions
++    assert "str" in instructions
++    
++    # Check that container types are mentioned
++    assert "list" in instructions
++    assert "dict" in instructions 
++    assert "tuple" in instructions
++    assert "set" in instructions
++    assert "Optional" in instructions
++    
++    # Check field names are mentioned
++    assert "departments" in instructions
++    assert "projects" in instructions
++    assert "employee_directory" in instructions
++    assert "regional_data" in instructions
++    assert "company_tags" in instructions
++    assert "announcements" in instructions
++    assert "quarterly_reports" in instructions
++    assert "metadata" in instructions
++    assert "initiatives" in instructions
++    
++    # Verify structure examples are included for custom classes
++    assert "When you see 'Department' in a type attribute" in instructions
++    assert "When you see 'Employee' in a type attribute" in instructions
++    assert "When you see 'Project' in a type attribute" in instructions
++    
++    # Check that nested class field names are mentioned
++    assert "budget" in instructions
++    assert "email" in instructions
++    assert "team_members" in instructions
++    assert "milestones" in instructions
++    
++    # Check that union types are handled
++    assert "Project | Department" in instructions or ("Project" in instructions and "Department" in instructions)
++
++
++def test_simple_company_parsing():
++    """Test parsing a simple company structure first"""
++    
++    # Start with a simpler Company class
++    class SimpleCompany(Deserializable):
++        name: str
++        departments: List[Department]
++        employee_directory: dict[str, Employee]
++    
++    xml = """<SimpleCompany>
++        <name>TechCorp</name>
++        <departments>
++            <item>
++                <name>Engineering</name>
++                <budget>1000000.0</budget>
++            </item>
++        </departments>
++        <employee_directory>
++            <item key="alice" type="Employee">
++                <name>Alice</name>
++                <id>1</id>
++                <email>alice@techcorp.com</email>
++                <department>
++                    <name>Engineering</name>
++                    <budget>1000000.0</budget>
++                </department>
++            </item>
++        </employee_directory>
++    </SimpleCompany>"""
++    
++    parser = Parser(SimpleCompany)
++    
++    # Enable debug to see what's happening
++    import os
++    os.environ['GASP_DEBUG'] = '1'
++    
++    parser.feed(xml)
++    
++    # Check partial state before validation
++    partial = parser.get_partial()
++    print(f"\nPartial object before validation: {partial}")
++    print(f"Is complete: {parser.is_complete()}")
++    if partial:
++        print(f"Name: {getattr(partial, 'name', 'NOT SET')}")
++        print(f"Departments: {getattr(partial, 'departments', 'NOT SET')}")
++        print(f"Employee directory: {getattr(partial, 'employee_directory', 'NOT SET')}")
++    
++    result = parser.validate()
++    
++    assert result is not None
++    assert result.name == "TechCorp"
++    assert len(result.departments) == 1
++    assert result.departments[0].name == "Engineering"
++    
++    # Check the dict parsing
++    print(f"Employee directory: {result.employee_directory}")
++    assert len(result.employee_directory) > 0, "Employee directory should not be empty"
++    assert "alice" in result.employee_directory
++    assert result.employee_directory["alice"].name == "Alice"
++
++
++def test_torture_test_with_actual_parsing():
++    """Test that we can actually parse a deeply nested structure"""
++    
++    # For now, let's use a simpler XML that focuses on the core issue
++    xml = """<Company>
++        <name type="str">TechCorp</name>
++        <departments type="list[Department]">
++            <item type="Department">
++                <name type="str">Engineering</name>
++                <budget type="float">1000000.0</budget>
++            </item>
++            <item type="Department">
++                <name type="str">Sales</name>
++                <budget type="float">500000.0</budget>
++            </item>
++        </departments>
++        <projects type="list[Project]">
++            <item type="Project">
++                <title type="str">AI Platform</title>
++                <description type="str">Next-gen AI platform</description>
++                <team_members type="list[Employee]">
++                    <item type="Employee">
++                        <name type="str">Alice</name>
++                        <id type="int">1</id>
++                        <email type="str">alice@techcorp.com</email>
++                        <department type="Department">
++                            <name type="str">Engineering</name>
++                            <budget type="float">1000000.0</budget>
++                        </department>
++                    </item>
++                </team_members>
++                <milestones type="dict[str, str]">
++                    <item key="Q1" type="str">Planning</item>
++                    <item key="Q2" type="str">Development</item>
++                </milestones>
++            </item>
++        </projects>
++        <employee_directory type="dict[str, Employee]">
++            <item key="alice" type="Employee">
++                <name type="str">Alice</name>
++                <id type="int">1</id>
++                <email type="str">alice@techcorp.com</email>
++                <department type="Department">
++                    <name type="str">Engineering</name>
++                    <budget type="float">1000000.0</budget>
++                </department>
++            </item>
++        </employee_directory>
++        <regional_data type="dict[str, list[tuple[str, int, Union[float, None]]]]">
++            <item key="North America" type="list[tuple[str, int, Union[float, None]]]">
++                <item type="tuple[str, int, Union[float, None]]">
++                    <item type="str">USA</item>
++                    <item type="int">100</item>
++                    <item type="float">95.5</item>
++                </item>
++                <item type="tuple[str, int, Union[float, None]]">
++                    <item type="str">Canada</item>
++                    <item type="int">50</item>
++                    <item type="None">None</item>
++                </item>
++            </item>
++        </regional_data>
++        <company_tags type="set[str]">
++            <item type="str">tech</item>
++            <item type="str">startup</item>
++            <item type="str">AI</item>
++        </company_tags>
++        <announcements type="list[Union[str, dict[str, Union[str, int]]]]">
++            <item type="str">Company picnic next Friday!</item>
++            <item type="dict[str, Union[str, int]]">
++                <item key="type" type="str">funding</item>
++                <item key="amount" type="int">10000000</item>
++            </item>
++        </announcements>
++        <quarterly_reports type="list[Union[dict[str, Union[float, list[str]]], None]]">
++            <item type="dict[str, Union[float, list[str]]]">
++                <item key="revenue" type="float">1500000.0</item>
++                <item key="highlights" type="list[str]">
++                    <item type="str">New product launch</item>
++                    <item type="str">Exceeded targets</item>
++                </item>
++            </item>
++            <item type="None">None</item>
++        </quarterly_reports>
++        <metadata type="tuple[str, int, Union[list[dict[str, Employee]], None]]">
++            <item type="str">TechCorp Metadata</item>
++            <item type="int">2024</item>
++            <item type="list[dict[str, Employee]]">
++                <item type="dict[str, Employee]">
++                    <item key="ceo" type="Employee">
++                        <name type="str">Bob</name>
++                        <id type="int">0</id>
++                        <email type="str">bob@techcorp.com</email>
++                        <department type="Department">
++                            <name type="str">Executive</name>
++                            <budget type="float">2000000.0</budget>
++                        </department>
++                    </item>
++                </item>
++            </item>
++        </metadata>
++        <initiatives type="list[dict[str, Union[list[Union[Project, Department]], None]]]">
++            <item type="dict[str, Union[list[Union[Project, Department]], None]]">
++                <item key="Q1-initiatives" type="list[Union[Project, Department]]">
++                    <item type="Project">
++                        <title type="str">Mobile App</title>
++                        <description type="str">New mobile application</description>
++                        <team_members type="list[Employee]" />
++                        <milestones type="dict[str, str]" />
++                    </item>
++                    <item type="Department">
++                        <name type="str">Mobile Division</name>
++                        <budget type="float">750000.0</budget>
++                    </item>
++                </item>
++            </item>
++            <item type="dict[str, Union[list[Union[Project, Department]], None]]">
++                <item key="Q2-initiatives" type="None">None</item>
++            </item>
++        </initiatives>
++    </Company>"""
++    
++    # This is the torture test - can the parser handle all this nesting?
++    parser = Parser(Company)
++    parser.feed(xml)
++    result = parser.validate()
++    
++    # Make sure we got a result
++    assert result is not None
++    
++    # Basic assertions
++    assert result.name == "TechCorp"
++    assert len(result.departments) == 2
++    assert result.departments[0].name == "Engineering"
++    assert result.departments[0].budget == 1000000.0
++    
++    # Check optional list worked
++    assert result.projects is not None
++    assert len(result.projects) == 1
++    assert result.projects[0].title == "AI Platform"
++    assert len(result.projects[0].team_members) == 1
++    assert result.projects[0].team_members[0].name == "Alice"
++    
++    # Check dict
++    assert "alice" in result.employee_directory
++    assert result.employee_directory["alice"].email == "alice@techcorp.com"
++    
++    # Check deeply nested optional dict of lists of tuples
++    assert result.regional_data is not None
++    assert "North America" in result.regional_data
++    na_data = result.regional_data["North America"]
++    assert len(na_data) == 2
++    assert na_data[0] == ("USA", 100, 95.5)
++    assert na_data[1] == ("Canada", 50, None)
++    
++    # Check optional set
++    assert result.company_tags is not None
++    assert result.company_tags == {"tech", "startup", "AI"}
++    
++    # Check union list
++    assert len(result.announcements) == 2
++    assert result.announcements[0] == "Company picnic next Friday!"
++    assert isinstance(result.announcements[1], dict)
++    assert result.announcements[1]["type"] == "funding"
++    assert result.announcements[1]["amount"] == 10000000
++    
++    # Check nested optional lists
++    assert result.quarterly_reports is not None
++    assert len(result.quarterly_reports) == 2
++    assert result.quarterly_reports[0] is not None
++    assert result.quarterly_reports[0]["revenue"] == 1500000.0
++    assert result.quarterly_reports[0]["highlights"] == ["New product launch", "Exceeded targets"]
++    assert result.quarterly_reports[1] is None
++    
++    # Check tuple with mixed types
++    assert result.metadata[0] == "TechCorp Metadata"
++    assert result.metadata[1] == 2024
++    assert result.metadata[2] is not None
++    assert len(result.metadata[2]) == 1
++    assert "ceo" in result.metadata[2][0]
++    assert result.metadata[2][0]["ceo"].name == "Bob"
++    
++    # Check super nested initiatives
++    assert len(result.initiatives) == 2
++    assert "Q1-initiatives" in result.initiatives[0]
++    q1_list = result.initiatives[0]["Q1-initiatives"]
++    assert q1_list is not None
++    assert len(q1_list) == 2
++    assert isinstance(q1_list[0], Project)
++    assert q1_list[0].title == "Mobile App"
++    assert isinstance(q1_list[1], Department)
++    assert q1_list[1].name == "Mobile Division"
++    assert result.initiatives[1]["Q2-initiatives"] is None
++
++
+ def test_type_alias_with_type_statement():
+     """Test that 'type X = Union[...]' syntax generates correct format"""
+     
+diff --git a/src/lib.rs b/src/lib.rs
+index 8c9aecc..89086ee 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -4,6 +4,7 @@ use pyo3::prelude::*;
+ mod parser;
+ mod python_types;
+ mod tag_finder;
++mod type_string_parser;
+ mod xml_parser;
+ mod xml_types;
+ 
+diff --git a/src/parser.rs b/src/parser.rs
+index a54721c..8e5a4ff 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -115,6 +115,84 @@ impl TypedStreamParser {
+                 StackFrame::Field {
+                     content, type_info, ..
+                 } => {
++                    // Check if content is "None" and we're parsing a Union that includes None
++                    if content.trim() == "None"
++                        && type_info.kind == crate::python_types::PyTypeKind::Union
++                    {
++                        // Check if the union contains None type
++                        if type_info
++                            .args
++                            .iter()
++                            .any(|t| t.kind == crate::python_types::PyTypeKind::None)
++                        {
++                            return Ok(py.None());
++                        }
++                    }
++
++                    // For Union types, try to parse based on content
++                    if type_info.kind == crate::python_types::PyTypeKind::Union {
++                        debug!("Parsing union with content: '{}'", content);
++
++                        // Check if any primitive types match
++                        for arg in &type_info.args {
++                            debug!("  Trying to parse as {:?}", arg.kind);
++                            match arg.kind {
++                                crate::python_types::PyTypeKind::Float => {
++                                    if let Ok(val) = content.parse::<f64>() {
++                                        debug!("    Successfully parsed as float: {}", val);
++                                        return Ok(val.into_py(py));
++                                    }
++                                }
++                                crate::python_types::PyTypeKind::Integer => {
++                                    if let Ok(val) = content.parse::<i64>() {
++                                        return Ok(val.into_py(py));
++                                    }
++                                }
++                                crate::python_types::PyTypeKind::Boolean => {
++                                    if content.to_lowercase() == "true"
++                                        || content == "1"
++                                        || content.to_lowercase() == "yes"
++                                    {
++                                        return Ok(true.into_py(py));
++                                    } else if content.to_lowercase() == "false"
++                                        || content == "0"
++                                        || content.to_lowercase() == "no"
++                                    {
++                                        return Ok(false.into_py(py));
++                                    }
++                                }
++                                crate::python_types::PyTypeKind::None => {
++                                    if content.trim() == "None"
++                                        || content.trim() == "null"
++                                        || content.trim().is_empty()
++                                    {
++                                        return Ok(py.None());
++                                    }
++                                }
++                                _ => {}
++                            }
++                        }
++
++                        // If no other type matched and we have String in the union, use that
++                        if type_info
++                            .args
++                            .iter()
++                            .any(|t| t.kind == crate::python_types::PyTypeKind::String)
++                        {
++                            let decoded = content
++                                .replace("&amp;", "&")
++                                .replace("&lt;", "<")
++                                .replace("&gt;", ">")
++                                .replace("&quot;", "\"")
++                                .replace("&#39;", "'")
++                                .replace("&apos;", "'");
++                            return Ok(decoded.into_py(py));
++                        }
++
++                        // Fallback to None
++                        return Ok(py.None());
++                    }
++
+                     // Convert content to the appropriate primitive type
+                     match type_info.kind {
+                         crate::python_types::PyTypeKind::String => {
+@@ -132,10 +210,17 @@ impl TypedStreamParser {
+                             Ok(val) => Ok(val.into_py(py)),
+                             Err(_) => Ok(py.None()),
+                         },
+-                        crate::python_types::PyTypeKind::Float => match content.parse::<f64>() {
+-                            Ok(val) => Ok(val.into_py(py)),
+-                            Err(_) => Ok(py.None()),
+-                        },
++                        crate::python_types::PyTypeKind::Float => {
++                            // Handle "None" as Python None for Union types that include float
++                            if content.trim() == "None" {
++                                Ok(py.None())
++                            } else {
++                                match content.parse::<f64>() {
++                                    Ok(val) => Ok(val.into_py(py)),
++                                    Err(_) => Ok(py.None()),
++                                }
++                            }
++                        }
+                         crate::python_types::PyTypeKind::Boolean => {
+                             let val =
+                                 matches!(content.to_lowercase().as_str(), "true" | "1" | "yes");
+@@ -215,11 +300,57 @@ impl TypedStreamParser {
+                     current_field: None,
+                 }))
+             }
+-            crate::python_types::PyTypeKind::Union => {
+-                // For unions, we don't create a frame immediately.
+-                // We wait for a specific member tag to be identified.
++            crate::python_types::PyTypeKind::Optional => {
++                // Convert Optional[T] to Union[T, None]
++                let inner_type = type_info
++                    .args
++                    .get(0)
++                    .cloned()
++                    .unwrap_or_else(PyTypeInfo::any);
++                let none_type =
++                    PyTypeInfo::new(crate::python_types::PyTypeKind::None, "None".to_string())
++                        .with_module("builtins".to_string());
++
++                let union_type =
++                    PyTypeInfo::new(crate::python_types::PyTypeKind::Union, "Union".to_string())
++                        .with_module("typing".to_string())
++                        .with_args(vec![inner_type, none_type]);
++
++                // Recursively call with the converted Union type
++                self.push_frame_for_type(&union_type, tag_name)?;
+                 Ok(None)
+             }
++            crate::python_types::PyTypeKind::Union => {
++                // Check if this union contains exactly one container type
++                let container_types: Vec<_> = type_info
++                    .args
++                    .iter()
++                    .filter(|t| {
++                        matches!(
++                            t.kind,
++                            crate::python_types::PyTypeKind::List
++                                | crate::python_types::PyTypeKind::Dict
++                                | crate::python_types::PyTypeKind::Set
++                                | crate::python_types::PyTypeKind::Tuple
++                        )
++                    })
++                    .collect();
++
++                // Check if union contains any primitive types
++                let has_primitives = type_info.args.iter().any(|t| t.is_primitive());
++
++                if container_types.len() == 1 && !has_primitives {
++                    // Only automatically use the container type if there are no primitives in the union
++                    // This handles cases like Union[List[str], None] but not Union[str, dict[...]]
++                    self.push_frame_for_type(container_types[0], tag_name)?;
++                    Ok(None)
++                } else {
++                    // For unions with primitives or multiple container types,
++                    // we don't create a frame immediately.
++                    // We wait for content or type attributes to determine the actual type.
++                    Ok(None)
++                }
++            }
+             _ => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                 "Cannot create frame for primitive type {:?}",
+                 type_info.kind
+@@ -232,24 +363,18 @@ impl TypedStreamParser {
+     }
+ 
+     fn create_type_info_from_string(&self, type_str: &str) -> PyResult<PyTypeInfo> {
+-        let (kind, name) = match type_str {
+-            "int" => (crate::python_types::PyTypeKind::Integer, "int"),
+-            "str" | "string" => (crate::python_types::PyTypeKind::String, "str"),
+-            "float" => (crate::python_types::PyTypeKind::Float, "float"),
+-            "bool" | "boolean" => (crate::python_types::PyTypeKind::Boolean, "bool"),
+-            "list" => (crate::python_types::PyTypeKind::List, "list"),
+-            "dict" => (crate::python_types::PyTypeKind::Dict, "dict"),
+-            "set" => (crate::python_types::PyTypeKind::Set, "set"),
+-            "tuple" => (crate::python_types::PyTypeKind::Tuple, "tuple"),
+-            _ => {
+-                // Default to string for unknown types
+-                (crate::python_types::PyTypeKind::String, "str")
+-            }
+-        };
+-
+-        let type_info = PyTypeInfo::new(kind, name.to_string()).with_module("builtins".to_string());
+-
+-        Ok(type_info)
++        debug!("create_type_info_from_string: type_str = '{}'", type_str);
++        let result = crate::type_string_parser::parse_type_string(type_str)?;
++        debug!(
++            "  -> name: {}, kind: {:?}, args: {}",
++            result.name,
++            result.kind,
++            result.args.len()
++        );
++        for (i, arg) in result.args.iter().enumerate() {
++            debug!("     arg[{}]: name={}, kind={:?}", i, arg.name, arg.kind);
++        }
++        Ok(result)
+     }
+ 
+     fn build_current_intermediate_state(&self) -> PyResult<Option<PyObject>> {
+@@ -323,8 +448,13 @@ impl TypedStreamParser {
+                         i, type_info.name, current_field
+                     );
+                 }
+-                StackFrame::Field { name, .. } => {
+-                    debug!("  Stack[{}]: Field(name={})", i, name);
++                StackFrame::Field {
++                    name, type_info, ..
++                } => {
++                    debug!(
++                        "  Stack[{}]: Field(name={}, type={})",
++                        i, name, type_info.name
++                    );
+                 }
+                 _ => {
+                     debug!("  Stack[{}]: {:?}", i, frame);
+@@ -332,12 +462,154 @@ impl TypedStreamParser {
+             }
+         }
+ 
++        // Special handling: if we're in a Field frame for a Union type that contains containers,
++        // and we encounter a nested tag, we need to convert the Field frame to the appropriate container
++        if let Some(StackFrame::Field {
++            type_info, name, ..
++        }) = self.stack.last()
++        {
++            if type_info.kind == crate::python_types::PyTypeKind::Union {
++                // Check if this union contains dict type and the nested tag suggests dict content
++                let has_dict = type_info
++                    .args
++                    .iter()
++                    .any(|t| t.kind == crate::python_types::PyTypeKind::Dict);
++                if has_dict && tag_name == "item" && tag.attributes.contains_key("key") {
++                    // This is a dict item! Convert the Field frame to a Dict frame
++                    debug!("Converting Field frame to Dict frame for Union[str, dict]");
++                    let field_name = name.clone();
++                    let field_type = type_info.clone();
++
++                    // Find the dict type in the union
++                    let dict_type = field_type
++                        .args
++                        .iter()
++                        .find(|t| t.kind == crate::python_types::PyTypeKind::Dict)
++                        .cloned()
++                        .unwrap();
++
++                    // Pop the Field frame
++                    self.stack.pop();
++
++                    // Push a Dict frame
++                    self.push_frame_for_type(&dict_type, &field_name)?;
++                }
++            }
++        }
++
+         // Determine what type of frame to create based on the current stack top.
+         // This is done by peeking at the stack without a long-lived mutable borrow.
+         let mut next_type_info = if let Some(frame) = self.stack.last() {
+             match frame {
+                 StackFrame::Object { type_info, .. } => {
+                     if let Some(field_info) = type_info.fields.get(tag_name) {
++                        // We have field info from the class definition
++                        // Check if the field has a type attribute that provides more specific type info
++                        if let Some(type_attr) = tag.attributes.get("type") {
++                            // Only parse the type attribute if it's a complex type string
++                            // AND the field is a generic container or union that needs specialization
++                            let needs_specialization = match field_info.kind {
++                                crate::python_types::PyTypeKind::List
++                                | crate::python_types::PyTypeKind::Dict
++                                | crate::python_types::PyTypeKind::Set
++                                | crate::python_types::PyTypeKind::Tuple => {
++                                    // For containers, always allow type attribute parsing if it has generics
++                                    type_attr.contains('[')
++                                }
++                                crate::python_types::PyTypeKind::Union
++                                | crate::python_types::PyTypeKind::Optional => {
++                                    // For unions/optionals, only parse if it's a complex type string
++                                    type_attr.contains('[')
++                                }
++                                _ => false,
++                            };
++
++                            if needs_specialization {
++                                // Try to parse the type attribute for more specific type info
++                                match self.create_type_info_from_string(type_attr) {
++                                    Ok(mut parsed_type) => {
++                                        // Preserve py_type from the field if the parsed type doesn't have it
++                                        if parsed_type.py_type.is_none()
++                                            && field_info.py_type.is_some()
++                                        {
++                                            parsed_type.py_type = field_info.py_type.clone();
++                                        }
++                                        Some(parsed_type)
++                                    }
++                                    Err(_) => Some(field_info.clone()),
++                                }
++                            } else {
++                                // Use the field info as-is
++                                Some(field_info.clone())
++                            }
++                        } else {
++                            // No type attribute, process the field normally
++                            let field_info =
++                                if field_info.kind == crate::python_types::PyTypeKind::Optional {
++                                    // Convert Optional[T] to Union[T, None]
++                                    let inner_type = field_info
++                                        .args
++                                        .get(0)
++                                        .cloned()
++                                        .unwrap_or_else(|| PyTypeInfo::any());
++                                    let none_type = PyTypeInfo::new(
++                                        crate::python_types::PyTypeKind::None,
++                                        "None".to_string(),
++                                    )
++                                    .with_module("builtins".to_string());
++
++                                    PyTypeInfo::new(
++                                        crate::python_types::PyTypeKind::Union,
++                                        "Union".to_string(),
++                                    )
++                                    .with_module("typing".to_string())
++                                    .with_args(vec![inner_type, none_type])
++                                } else {
++                                    field_info.clone()
++                                };
++
++                            // If the field is a union type, check the type attribute
++                            if field_info.kind == crate::python_types::PyTypeKind::Union {
++                                if let Some(type_attr) = tag.attributes.get("type") {
++                                    field_info
++                                        .args
++                                        .iter()
++                                        .find(|t| &t.name == type_attr)
++                                        .cloned()
++                                        .or(Some(field_info))
++                                } else {
++                                    // If no type attribute, check if this is a Union containing a container type
++                                    let container_types: Vec<_> = field_info
++                                        .args
++                                        .iter()
++                                        .filter(|t| {
++                                            matches!(
++                                                t.kind,
++                                                crate::python_types::PyTypeKind::List
++                                                    | crate::python_types::PyTypeKind::Dict
++                                                    | crate::python_types::PyTypeKind::Set
++                                                    | crate::python_types::PyTypeKind::Tuple
++                                            )
++                                        })
++                                        .collect();
++
++                                    if container_types.len() == 1 {
++                                        // If there's exactly one container type in the union,
++                                        // preemptively use that type (we'll validate later)
++                                        Some(container_types[0].clone())
++                                    } else if container_types.is_empty() {
++                                        // No container types, keep the union
++                                        Some(field_info)
++                                    } else {
++                                        // Multiple container types, we need more info
++                                        Some(field_info)
++                                    }
++                                }
++                            } else {
++                                Some(field_info)
++                            }
++                        }
++                    } else if let Some(field_info) = type_info.fields.get(tag_name) {
+                         // If the field is Optional, convert it to Union[T, None]
+                         let field_info =
+                             if field_info.kind == crate::python_types::PyTypeKind::Optional {
+@@ -373,7 +645,33 @@ impl TypedStreamParser {
+                                     .cloned()
+                                     .or(Some(field_info))
+                             } else {
+-                                Some(field_info)
++                                // If no type attribute, check if this is a Union containing a container type
++                                // (e.g., Optional[List[str]] converted to Union[List[str], None])
++                                let container_types: Vec<_> = field_info
++                                    .args
++                                    .iter()
++                                    .filter(|t| {
++                                        matches!(
++                                            t.kind,
++                                            crate::python_types::PyTypeKind::List
++                                                | crate::python_types::PyTypeKind::Dict
++                                                | crate::python_types::PyTypeKind::Set
++                                                | crate::python_types::PyTypeKind::Tuple
++                                        )
++                                    })
++                                    .collect();
++
++                                if container_types.len() == 1 {
++                                    // If there's exactly one container type in the union,
++                                    // preemptively use that type (we'll validate later)
++                                    Some(container_types[0].clone())
++                                } else if container_types.is_empty() {
++                                    // No container types, keep the union
++                                    Some(field_info)
++                                } else {
++                                    // Multiple container types, we need more info
++                                    Some(field_info)
++                                }
+                             }
+                         } else {
+                             Some(field_info)
+@@ -381,6 +679,11 @@ impl TypedStreamParser {
+                     } else if type_info.kind == crate::python_types::PyTypeKind::Union {
+                         type_info.args.iter().find(|t| t.name == *tag_name).cloned()
+                     } else {
++                        // Unknown field - just ignore it
++                        debug!(
++                            "Ignoring unknown field '{}' in object type '{}'",
++                            tag_name, type_info.name
++                        );
+                         None
+                     }
+                 }
+@@ -394,6 +697,8 @@ impl TypedStreamParser {
+                                 .find(|t| &t.name == type_attr)
+                                 .cloned()
+                         } else {
++                            // If no type attribute and union contains primitives,
++                            // keep the union type so we can handle it as a Field frame
+                             Some(item_type.clone())
+                         }
+                     } else {
+@@ -425,7 +730,34 @@ impl TypedStreamParser {
+                         types.get(0).cloned()
+                     } else {
+                         // For fixed tuples, get the type for the current position
+-                        types.get(items.len()).cloned()
++                        let item_type = types.get(items.len()).cloned();
++
++                        // Convert Optional to Union[T, None] like we do elsewhere
++                        if let Some(t) = item_type {
++                            if t.kind == crate::python_types::PyTypeKind::Optional {
++                                // Convert Optional[T] to Union[T, None]
++                                let inner_type =
++                                    t.args.get(0).cloned().unwrap_or_else(|| PyTypeInfo::any());
++                                let none_type = PyTypeInfo::new(
++                                    crate::python_types::PyTypeKind::None,
++                                    "None".to_string(),
++                                )
++                                .with_module("builtins".to_string());
++
++                                Some(
++                                    PyTypeInfo::new(
++                                        crate::python_types::PyTypeKind::Union,
++                                        "Union".to_string(),
++                                    )
++                                    .with_module("typing".to_string())
++                                    .with_args(vec![inner_type, none_type]),
++                                )
++                            } else {
++                                Some(t)
++                            }
++                        } else {
++                            None
++                        }
+                     }
+                 }
+                 StackFrame::Dict { value_type, .. } if tag_name == "item" => value_type.clone(),
+@@ -495,18 +827,83 @@ impl TypedStreamParser {
+             }
+ 
+             if should_push {
++                debug!(
++                    "Pushing frame for tag '{}' with type {:?} (kind={:?})",
++                    tag_name, actual_type.name, actual_type.kind
++                );
+                 // Push the new frame.
+-                if actual_type.is_primitive() {
++                // Check both actual_type and original type_info for primitive unions
++                if actual_type.is_primitive()
++                    || actual_type.is_primitive_union()
++                    || (type_info.kind == crate::python_types::PyTypeKind::Union
++                        && type_info.is_primitive_union())
++                {
+                     self.stack.push(StackFrame::Field {
+                         name: tag_name.clone(),
+                         content: String::new(),
+-                        type_info: actual_type,
++                        type_info: if type_info.kind == crate::python_types::PyTypeKind::Union
++                            && type_info.is_primitive_union()
++                        {
++                            type_info // Use the original Union type for primitive unions
++                        } else {
++                            actual_type
++                        },
+                     });
+                     pushed_new_frame = true;
++                } else if actual_type.kind == crate::python_types::PyTypeKind::Union {
++                    // For unions that are not primitive-only, check if they contain primitives
++                    let has_primitives = actual_type.args.iter().any(|t| t.is_primitive());
++
++                    // Special case: Union[Container, None] (from Optional[Container])
++                    // If the union has exactly 2 args, one container and one None, use the container
++                    let container_types: Vec<_> = actual_type
++                        .args
++                        .iter()
++                        .filter(|t| {
++                            matches!(
++                                t.kind,
++                                crate::python_types::PyTypeKind::List
++                                    | crate::python_types::PyTypeKind::Dict
++                                    | crate::python_types::PyTypeKind::Set
++                                    | crate::python_types::PyTypeKind::Tuple
++                            )
++                        })
++                        .collect();
++
++                    let has_none = actual_type
++                        .args
++                        .iter()
++                        .any(|t| t.kind == crate::python_types::PyTypeKind::None);
++
++                    if actual_type.args.len() == 2 && container_types.len() == 1 && has_none {
++                        // This is Optional[Container], use the container type
++                        debug!("Union is Optional[Container], using container type directly");
++                        self.push_frame_for_type(container_types[0], tag_name)?;
++                        pushed_new_frame = true;
++                    } else if has_primitives {
++                        // Union contains both primitives and containers
++                        // Create a Field frame to collect content first
++                        debug!("Union contains primitives and containers, creating Field frame");
++                        self.stack.push(StackFrame::Field {
++                            name: tag_name.clone(),
++                            content: String::new(),
++                            type_info: actual_type,
++                        });
++                        pushed_new_frame = true;
++                    } else {
++                        // Union contains only containers, use normal logic
++                        self.push_frame_for_type(&actual_type, tag_name)?;
++                        pushed_new_frame = true;
++                    }
+                 } else {
+                     self.push_frame_for_type(&actual_type, tag_name)?;
+                     pushed_new_frame = true;
+                 }
++            } else {
++                debug!(
++                    "NOT pushing frame for tag '{}' (should_push=false)",
++                    tag_name
++                );
+             }
+         }
+ 
+@@ -548,7 +945,11 @@ impl TypedStreamParser {
+         debug!("handle_stack_tag_close: tag_name={}", tag_name);
+ 
+         // Debug: print current stack state before processing
+-        debug!("Stack state before processing close tag:");
++        debug!(
++            "Stack state before processing close tag '{}', stack_len={}:",
++            tag_name,
++            self.stack.len()
++        );
+         for (i, frame) in self.stack.iter().enumerate() {
+             match frame {
+                 StackFrame::Object {
+@@ -561,6 +962,16 @@ impl TypedStreamParser {
+                         i, type_info.name, current_field
+                     );
+                 }
++                StackFrame::List {
++                    tag_name, items, ..
++                } => {
++                    debug!(
++                        "  Stack[{}]: List(tag={}, items.len={})",
++                        i,
++                        tag_name,
++                        items.len()
++                    );
++                }
+                 StackFrame::Field { name, .. } => {
+                     debug!("  Stack[{}]: Field(name={})", i, name);
+                 }
+@@ -590,6 +1001,7 @@ impl TypedStreamParser {
+                                 StackFrame::List { .. }
+                                 | StackFrame::Set { .. }
+                                 | StackFrame::Tuple { .. } => tag_name_lower == "item",
++                                StackFrame::Dict { .. } => tag_name_lower == "item",
+                                 _ => false,
+                             })
+                 }
+diff --git a/src/python_types.rs b/src/python_types.rs
+index 6b0a8c6..f36a5d7 100644
+--- a/src/python_types.rs
++++ b/src/python_types.rs
+@@ -103,6 +103,16 @@ impl PyTypeInfo {
+         )
+     }
+ 
++    /// Check if this is a Union type that contains only primitive types
++    pub fn is_primitive_union(&self) -> bool {
++        if self.kind != PyTypeKind::Union {
++            return false;
++        }
++
++        // Check if all union members are primitives
++        self.args.iter().all(|arg| arg.is_primitive())
++    }
++
+     /// Check if a XmlValue matches this type
+     pub fn matches(&self, value: &XmlValue) -> bool {
+         match (&self.kind, value) {
+@@ -932,35 +942,9 @@ pub fn create_instance_from_xml(
+                     if let Some(inner_type) = field_info.args.get(0) {
+                         debug!("Optional inner type: {:?}", inner_type.name);
+ 
+-                        // Special handling for Optional[List[...]]
+-                        if inner_type.kind == PyTypeKind::List {
+-                            // For lists, we need to parse the children as list items
+-                            let py_list = PyList::empty(py);
+-                            let element_type = inner_type.args.get(0);
+-
+-                            for grand_child in grand_children {
+-                                if let XmlValue::Element(item_name, item_attrs, item_children) =
+-                                    grand_child
+-                                {
+-                                    if item_name == "item" && item_children.len() == 1 {
+-                                        if let Some(XmlValue::Text(text)) = item_children.get(0) {
+-                                            let py_value = xml_to_python(
+-                                                py,
+-                                                &XmlValue::Text(text.clone()),
+-                                                element_type,
+-                                            )?;
+-                                            py_list.append(py_value)?;
+-                                        }
+-                                    }
+-                                }
+-                            }
+-
+-                            instance.setattr(child_name.as_str(), py_list)?;
+-                        } else {
+-                            // For other Optional types, parse normally
+-                            let py_value = xml_to_python(py, child, Some(inner_type))?;
+-                            instance.setattr(child_name.as_str(), py_value)?;
+-                        }
++                        // Use xml_to_python which handles all types properly including lists
++                        let py_value = xml_to_python(py, child, Some(inner_type))?;
++                        instance.setattr(child_name.as_str(), py_value)?;
+                     } else {
+                         // Fallback to generic parsing
+                         let py_value = xml_to_python(py, child, Some(field_info))?;
+@@ -1627,7 +1611,21 @@ pub fn create_instance_from_xml_events(
+     if let XmlValue::Element(tag_name, attrs, children) = xml_value {
+         if tag_name == type_info.name {
+             // Create instance
+-            let instance = type_info.py_type.as_ref().unwrap().as_ref(py).call0()?;
++            let py_type = type_info.py_type.as_ref().ok_or_else(|| {
++                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
++                    "Cannot instantiate class without py_type",
++                )
++            })?;
++
++            // Check if the type has __gasp_from_partial__ method
++            let instance = if py_type.as_ref(py).hasattr("__gasp_from_partial__")? {
++                let empty_dict = pyo3::types::PyDict::new(py);
++                py_type
++                    .as_ref(py)
++                    .call_method1("__gasp_from_partial__", (empty_dict,))?
++            } else {
++                py_type.as_ref(py).call0()?
++            };
+ 
+             // Set attributes
+             for (k, v) in &attrs {
+diff --git a/src/tag_finder.rs b/src/tag_finder.rs
+index 073b4e6..3330ef1 100644
+--- a/src/tag_finder.rs
++++ b/src/tag_finder.rs
+@@ -136,14 +136,77 @@ impl TagFinder {
+             let tag_body = &self.buf[lt + 1..gt]; // without '<' / '>'
+             let is_close = tag_body.starts_with('/');
+             let name_part = if is_close { &tag_body[1..] } else { tag_body };
+-            let mut parts = name_part.split_whitespace();
+-            let name = parts.next().unwrap_or("").to_owned();
++
++            // Find the first whitespace to separate tag name from attributes
++            let (name, attr_part) = match name_part.find(char::is_whitespace) {
++                Some(idx) => {
++                    let (n, a) = name_part.split_at(idx);
++                    (n.to_owned(), a.trim())
++                }
++                None => (name_part.to_owned(), ""),
++            };
+             let name_lower = name.to_lowercase();
+ 
++            // Parse attributes properly, handling quoted values with spaces
+             let mut attributes = HashMap::new();
+-            while let Some(part) = parts.next() {
+-                if let Some((key, value)) = part.split_once('=') {
+-                    attributes.insert(key.to_string(), value.trim_matches('"').to_string());
++            let mut remaining = attr_part;
++
++            while !remaining.is_empty() {
++                // Skip whitespace
++                remaining = remaining.trim_start();
++                if remaining.is_empty() {
++                    break;
++                }
++
++                // Find the equals sign
++                if let Some(eq_pos) = remaining.find('=') {
++                    let key = remaining[..eq_pos].trim().to_string();
++                    remaining = &remaining[eq_pos + 1..].trim_start();
++
++                    // Parse the value (handle quoted strings)
++                    let value = if remaining.starts_with('"') {
++                        // Find closing quote
++                        remaining = &remaining[1..]; // Skip opening quote
++                        if let Some(close_quote) = remaining.find('"') {
++                            let val = remaining[..close_quote].to_string();
++                            remaining = &remaining[close_quote + 1..];
++                            val
++                        } else {
++                            // Malformed attribute, take rest as value
++                            let val = remaining.to_string();
++                            remaining = "";
++                            val
++                        }
++                    } else if remaining.starts_with('\'') {
++                        // Handle single quotes too
++                        remaining = &remaining[1..]; // Skip opening quote
++                        if let Some(close_quote) = remaining.find('\'') {
++                            let val = remaining[..close_quote].to_string();
++                            remaining = &remaining[close_quote + 1..];
++                            val
++                        } else {
++                            // Malformed attribute, take rest as value
++                            let val = remaining.to_string();
++                            remaining = "";
++                            val
++                        }
++                    } else {
++                        // Unquoted value, read until whitespace
++                        let end = remaining
++                            .find(char::is_whitespace)
++                            .unwrap_or(remaining.len());
++                        let val = remaining[..end].to_string();
++                        remaining = &remaining[end..];
++                        val
++                    };
++
++                    attributes.insert(key, value);
++                } else {
++                    // No equals sign found, skip this token
++                    let end = remaining
++                        .find(char::is_whitespace)
++                        .unwrap_or(remaining.len());
++                    remaining = &remaining[end..];
+                 }
+             }
+ 
+@@ -180,6 +243,16 @@ impl TagFinder {
+                     self.inside_ignored = true;
+                     self.ignored_depth += 1;
+                     debug!("[TagFinder::push] Opened ignored tag '{}'. inside_ignored={}, ignored_depth={}", name, self.inside_ignored, self.ignored_depth);
++                } else if self.inside && !self.inside_ignored {
++                    // If we're inside a wanted tag, emit ALL nested tags (regardless of whether they're in the wanted list)
++                    debug!(
++                        "[TagFinder::push] Emitting Open for nested tag inside wanted tag: '{}'",
++                        name
++                    );
++                    emit(TagEvent::Open(Tag {
++                        name: name.clone(),
++                        attributes,
++                    }))?;
+                 } else if is_wanted && !self.inside_ignored {
+                     debug!("[TagFinder::push] Emitting Open for wanted tag: '{}'", name);
+                     emit(TagEvent::Open(Tag {
+@@ -198,16 +271,6 @@ impl TagFinder {
+                             name
+                         );
+                     }
+-                } else if self.inside && !self.inside_ignored && !is_ignored {
+-                    // Emit nested tags inside wanted tags as proper tag events
+-                    debug!(
+-                        "[TagFinder::push] Emitting Open for nested tag inside wanted tag: '{}'",
+-                        name
+-                    );
+-                    emit(TagEvent::Open(Tag {
+-                        name: name.clone(),
+-                        attributes,
+-                    }))?;
+                 } else {
+                     debug!("[TagFinder::push] Open Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
+                 }
+@@ -220,6 +283,21 @@ impl TagFinder {
+                         self.inside_ignored = false;
+                     }
+                     debug!("[TagFinder::push] Closed ignored tag '{}'. inside_ignored={}, ignored_depth={}", name, self.inside_ignored, self.ignored_depth);
++                } else if self.inside && !self.inside_ignored {
++                    // If we're inside a wanted tag, emit ALL nested closing tags
++                    debug!(
++                        "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
++                        name
++                    );
++                    emit(TagEvent::Close(name.clone()))?;
++                    // Only set inside=false if this is closing the main wanted tag
++                    if is_wanted {
++                        self.inside = false;
++                        debug!(
++                            "[TagFinder::push] Set self.inside = false for wanted tag '{}'",
++                            name
++                        );
++                    }
+                 } else if is_wanted && !self.inside_ignored {
+                     debug!(
+                         "[TagFinder::push] Emitting Close for wanted tag: '{}'",
+@@ -231,13 +309,6 @@ impl TagFinder {
+                         "[TagFinder::push] Set self.inside = false for tag '{}'",
+                         name
+                     );
+-                } else if self.inside && !self.inside_ignored && !is_ignored {
+-                    // Emit nested tags inside wanted tags as proper tag events
+-                    debug!(
+-                        "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
+-                        name
+-                    );
+-                    emit(TagEvent::Close(name.clone()))?;
+                 } else {
+                     debug!("[TagFinder::push] Close Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
+                 }
+diff --git a/src/type_string_parser.rs b/src/type_string_parser.rs
+new file mode 100644
+index 0000000..b3313b0
+--- /dev/null
++++ b/src/type_string_parser.rs
+@@ -0,0 +1,209 @@
++use crate::python_types::{PyTypeInfo, PyTypeKind};
++use pyo3::PyResult;
++
++/// Parse a type string like "list[str]" or "tuple[str, int, Optional[float]]"
++pub fn parse_type_string(type_str: &str) -> PyResult<PyTypeInfo> {
++    let trimmed = type_str.trim();
++
++    // Check if it has brackets (generic type)
++    if let Some(bracket_pos) = trimmed.find('[') {
++        let base_type = trimmed[..bracket_pos].trim();
++        let args_end = trimmed.rfind(']').ok_or_else(|| {
++            pyo3::exceptions::PyValueError::new_err(format!(
++                "Unclosed bracket in type: {}",
++                type_str
++            ))
++        })?;
++        let args_str = &trimmed[bracket_pos + 1..args_end];
++
++        // Parse the base type
++        let (kind, name) = match base_type {
++            "list" | "List" => (PyTypeKind::List, "list"),
++            "dict" | "Dict" => (PyTypeKind::Dict, "dict"),
++            "set" | "Set" => (PyTypeKind::Set, "set"),
++            "tuple" | "Tuple" => (PyTypeKind::Tuple, "tuple"),
++            "Optional" => (PyTypeKind::Optional, "Optional"),
++            "Union" => (PyTypeKind::Union, "Union"),
++            _ => {
++                // Unknown generic type, treat as Any
++                (PyTypeKind::Any, base_type)
++            }
++        };
++
++        // Parse the arguments
++        let args = parse_type_args(args_str)?;
++
++        let mut type_info = PyTypeInfo::new(kind.clone(), name.to_string());
++        type_info = type_info.with_args(args);
++
++        // Set appropriate module
++        match kind {
++            PyTypeKind::List | PyTypeKind::Dict | PyTypeKind::Set | PyTypeKind::Tuple => {
++                type_info = type_info.with_module("builtins".to_string());
++            }
++            PyTypeKind::Optional | PyTypeKind::Union => {
++                type_info = type_info.with_module("typing".to_string());
++            }
++            _ => {}
++        }
++
++        Ok(type_info)
++    } else {
++        // Simple type without brackets
++        let (kind, name) = match trimmed {
++            "int" => (PyTypeKind::Integer, "int"),
++            "str" | "string" => (PyTypeKind::String, "str"),
++            "float" => (PyTypeKind::Float, "float"),
++            "bool" | "boolean" => (PyTypeKind::Boolean, "bool"),
++            "list" | "List" => (PyTypeKind::List, "list"),
++            "dict" | "Dict" => (PyTypeKind::Dict, "dict"),
++            "set" | "Set" => (PyTypeKind::Set, "set"),
++            "tuple" | "Tuple" => (PyTypeKind::Tuple, "tuple"),
++            "None" => (PyTypeKind::None, "None"),
++            "Ellipsis" | "..." => (PyTypeKind::Any, "Ellipsis"), // Special case for Tuple[T, ...]
++            _ => {
++                // Unknown type, could be a class name
++                (PyTypeKind::Class, trimmed)
++            }
++        };
++
++        let type_info = PyTypeInfo::new(kind, name.to_string()).with_module("builtins".to_string());
++
++        Ok(type_info)
++    }
++}
++
++/// Parse comma-separated type arguments, handling nested brackets
++fn parse_type_args(args_str: &str) -> PyResult<Vec<PyTypeInfo>> {
++    let mut args = Vec::new();
++    let mut current_arg = String::new();
++    let mut bracket_depth = 0;
++    let mut in_quotes = false;
++    let mut escape_next = false;
++
++    for ch in args_str.chars() {
++        if escape_next {
++            current_arg.push(ch);
++            escape_next = false;
++            continue;
++        }
++
++        match ch {
++            '\\' => {
++                escape_next = true;
++                current_arg.push(ch);
++            }
++            '"' | '\'' => {
++                in_quotes = !in_quotes;
++                current_arg.push(ch);
++            }
++            '[' if !in_quotes => {
++                bracket_depth += 1;
++                current_arg.push(ch);
++            }
++            ']' if !in_quotes => {
++                bracket_depth -= 1;
++                current_arg.push(ch);
++            }
++            ',' if bracket_depth == 0 && !in_quotes => {
++                // End of current argument
++                let arg_str = current_arg.trim();
++                if !arg_str.is_empty() {
++                    args.push(parse_type_string(arg_str)?);
++                }
++                current_arg.clear();
++            }
++            _ => {
++                current_arg.push(ch);
++            }
++        }
++    }
++
++    // Don't forget the last argument
++    let arg_str = current_arg.trim();
++    if !arg_str.is_empty() {
++        args.push(parse_type_string(arg_str)?);
++    }
++
++    Ok(args)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_parse_simple_types() {
++        let int_type = parse_type_string("int").unwrap();
++        assert_eq!(int_type.name, "int");
++        assert_eq!(int_type.kind, PyTypeKind::Integer);
++
++        let str_type = parse_type_string("str").unwrap();
++        assert_eq!(str_type.name, "str");
++        assert_eq!(str_type.kind, PyTypeKind::String);
++    }
++
++    #[test]
++    fn test_parse_list_type() {
++        let list_type = parse_type_string("list[str]").unwrap();
++        assert_eq!(list_type.name, "list");
++        assert_eq!(list_type.kind, PyTypeKind::List);
++        assert_eq!(list_type.args.len(), 1);
++        assert_eq!(list_type.args[0].name, "str");
++    }
++
++    #[test]
++    fn test_parse_dict_type() {
++        let dict_type = parse_type_string("dict[str, int]").unwrap();
++        assert_eq!(dict_type.name, "dict");
++        assert_eq!(dict_type.kind, PyTypeKind::Dict);
++        assert_eq!(dict_type.args.len(), 2);
++        assert_eq!(dict_type.args[0].name, "str");
++        assert_eq!(dict_type.args[1].name, "int");
++    }
++
++    #[test]
++    fn test_parse_tuple_type() {
++        let tuple_type = parse_type_string("tuple[str, int, float]").unwrap();
++        assert_eq!(tuple_type.name, "tuple");
++        assert_eq!(tuple_type.kind, PyTypeKind::Tuple);
++        assert_eq!(tuple_type.args.len(), 3);
++        assert_eq!(tuple_type.args[0].name, "str");
++        assert_eq!(tuple_type.args[1].name, "int");
++        assert_eq!(tuple_type.args[2].name, "float");
++    }
++
++    #[test]
++    fn test_parse_nested_type() {
++        let nested_type = parse_type_string("list[dict[str, int]]").unwrap();
++        assert_eq!(nested_type.name, "list");
++        assert_eq!(nested_type.kind, PyTypeKind::List);
++        assert_eq!(nested_type.args.len(), 1);
++
++        let inner_dict = &nested_type.args[0];
++        assert_eq!(inner_dict.name, "dict");
++        assert_eq!(inner_dict.kind, PyTypeKind::Dict);
++        assert_eq!(inner_dict.args.len(), 2);
++    }
++
++    #[test]
++    fn test_parse_optional_type() {
++        let opt_type = parse_type_string("Optional[str]").unwrap();
++        assert_eq!(opt_type.name, "Optional");
++        assert_eq!(opt_type.kind, PyTypeKind::Optional);
++        assert_eq!(opt_type.args.len(), 1);
++        assert_eq!(opt_type.args[0].name, "str");
++    }
++
++    #[test]
++    fn test_parse_complex_tuple() {
++        let tuple_type = parse_type_string("tuple[str, int, Optional[float]]").unwrap();
++        assert_eq!(tuple_type.name, "tuple");
++        assert_eq!(tuple_type.kind, PyTypeKind::Tuple);
++        assert_eq!(tuple_type.args.len(), 3);
++        assert_eq!(tuple_type.args[0].name, "str");
++        assert_eq!(tuple_type.args[1].name, "int");
++        assert_eq!(tuple_type.args[2].name, "Optional");
++        assert_eq!(tuple_type.args[2].kind, PyTypeKind::Optional);
++    }
++}

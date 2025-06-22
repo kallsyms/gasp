@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 mod parser;
 mod python_types;
 mod tag_finder;
+mod type_string_parser;
 mod xml_parser;
 mod xml_types;
 
