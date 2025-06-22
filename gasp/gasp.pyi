@@ -56,7 +56,7 @@ class Parser(Generic[T]):
         pass
     
     def feed(self, chunk: str) -> Optional[T]:
-        """Feed a chunk of JSON data and return a partial object if available"""
+        """Feed a chunk of XML data and return a partial object if available"""
         pass
     
     def is_complete(self) -> bool:
