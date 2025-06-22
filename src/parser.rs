@@ -660,7 +660,7 @@ impl TypedStreamParser {
             debug!("  top_frame: {:?}", top);
         }
 
-        if let Some(top_frame) = self.stack.last() {
+        while let Some(top_frame) = self.stack.last() {
             let (frame_tag_name, frame_depth) = match top_frame {
                 StackFrame::List {
                     tag_name, depth, ..
@@ -680,9 +680,46 @@ impl TypedStreamParser {
                 StackFrame::Field { name, depth, .. } => (name.clone(), *depth),
             };
 
-            // Strict check: only pop if the tag name and depth match.
-            // This avoids the infinite loop that could happen with the while loop.
-            if frame_depth == depth && frame_tag_name.to_lowercase() == tag_name.to_lowercase() {
+            if frame_depth > depth {
+                // This is a child of the current closing tag, which was not properly closed.
+                // We should pop it off and integrate it into its parent.
+                let child_frame = self.stack.pop().unwrap();
+                let child_object = self.frame_to_pyobject(child_frame)?;
+
+                if let Some(parent_frame) = self.stack.last_mut() {
+                    match parent_frame {
+                        StackFrame::List { items, .. } => items.push(child_object),
+                        StackFrame::Set { items, .. } => items.push(child_object),
+                        StackFrame::Tuple { items, .. } => items.push(child_object),
+                        StackFrame::Dict {
+                            entries,
+                            current_key,
+                            ..
+                        } => {
+                            if let Some(key) = current_key.take() {
+                                entries.push((key, child_object));
+                            }
+                        }
+                        StackFrame::Object {
+                            instance,
+                            current_field,
+                            ..
+                        } => {
+                            if let Some(field_name) = current_field.take() {
+                                pyo3::Python::with_gil(|py| {
+                                    let _ = instance
+                                        .as_ref(py)
+                                        .setattr(field_name.as_str(), child_object);
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else if frame_depth == depth
+                && frame_tag_name.to_lowercase() == tag_name.to_lowercase()
+            {
+                // This is the matching frame for the closing tag.
                 let child_frame = self.stack.pop().unwrap();
                 let child_object = self.frame_to_pyobject(child_frame)?;
 
@@ -720,6 +757,10 @@ impl TypedStreamParser {
                     self.stack_based_result = Some(child_object);
                     self.is_done = true;
                 }
+                break; // We've handled the closing tag, so we can exit the loop.
+            } else {
+                // The top frame is at a lower depth, so we should not pop it.
+                break;
             }
         }
 
