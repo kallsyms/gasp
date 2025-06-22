@@ -375,6 +375,7 @@ def test_torture_test_with_actual_parsing():
     # Make sure we got a result
     assert result is not None
     
+    print(result.model_dump())
     # Basic assertions
     assert result.name == "TechCorp"
     assert len(result.departments) == 2

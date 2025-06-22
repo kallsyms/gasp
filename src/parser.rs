@@ -149,6 +149,15 @@ impl TypedStreamParser {
     }
 
     fn push_frame_for_type(&mut self, type_info: &PyTypeInfo, tag_name: &str) -> PyResult<()> {
+        // Handle Optional[T] by delegating to its inner type T
+        if type_info.kind == crate::python_types::PyTypeKind::Optional {
+            let inner_type = type_info
+                .args
+                .get(0)
+                .cloned()
+                .unwrap_or_else(PyTypeInfo::any);
+            return self.push_frame_for_type(&inner_type, tag_name);
+        }
         let frame = pyo3::Python::with_gil(|py| match type_info.kind {
             crate::python_types::PyTypeKind::List => {
                 let item_type = type_info
@@ -589,7 +598,8 @@ impl TypedStreamParser {
                                 } => parent_type.fields.contains_key(tag_name),
                                 StackFrame::List { .. }
                                 | StackFrame::Set { .. }
-                                | StackFrame::Tuple { .. } => tag_name_lower == "item",
+                                | StackFrame::Tuple { .. }
+                                | StackFrame::Dict { .. } => tag_name_lower == "item",
                                 _ => false,
                             })
                 }

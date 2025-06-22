@@ -13,7 +13,6 @@ class Deserializable:
     @classmethod
     def __gasp_from_partial__(cls, partial_data):
         """Create an instance from partial data"""
-        print(f"Deserializable.__gasp_from_partial__ called for {cls.__name__} with keys: {list(partial_data.keys())}")
         instance = cls()
         
         # Get type annotations to check for nested types
@@ -45,47 +44,51 @@ class Deserializable:
                     setattr(instance, field_name, None)
         
         for key, value in partial_data.items():
-            # Check if this field should be a specific type
+            # Don't overwrite an already-set meaningful value (prevents "Engineering" overriding "TechCorp")
+            current_val = getattr(instance, key, None)
+            if current_val not in (None, [], {}, (), set()):
+                continue
+
             if key in annotations:
                 field_type = annotations[key]
-                
-                # Handle list of objects
-                if hasattr(field_type, "__origin__") and field_type.__origin__ is list:
-                    # Get the element type of the list
-                    if hasattr(field_type, "__args__") and len(field_type.__args__) > 0:
-                        elem_type = field_type.__args__[0]
-                        
-                        # If element type is a Deserializable subclass and value is a list
-                        if (issubclass(elem_type, Deserializable) and 
-                            isinstance(value, list)):
-                            # Convert each item in the list to the proper type
-                            typed_list = []
-                            for item in value:
-                                # If it's already the right type, use it directly
-                                if isinstance(item, elem_type):
-                                    typed_list.append(item)
-                                # Otherwise, if it's a dict, convert it
-                                elif isinstance(item, dict):
-                                    typed_list.append(elem_type.__gasp_from_partial__(item))
-                                else:
-                                    # Use the item as is
-                                    typed_list.append(item)
-                            
-                            # Set the properly typed list
-                            setattr(instance, key, typed_list)
-                            continue
-                
-                # Handle single nested object
-                # Need to check if field_type is actually a class before calling issubclass
+
+                # Handle list[...] of Deserializable
+                if getattr(field_type, "__origin__", None) is list:
+                    elem_type = getattr(field_type, "__args__", [None])[0]
+                    if (isinstance(elem_type, type) and issubclass(elem_type, Deserializable)
+                            and isinstance(value, list)):
+                        typed_list = [
+                            item if isinstance(item, elem_type)
+                            else elem_type.__gasp_from_partial__(item) if isinstance(item, dict)
+                            else item
+                            for item in value
+                        ]
+                        setattr(instance, key, typed_list)
+                        continue
+
+                # Handle dict[str, Deserializable]
+                if getattr(field_type, "__origin__", None) is dict:
+                    val_type = getattr(field_type, "__args__", [None, None])[1]
+                    if (isinstance(val_type, type) and issubclass(val_type, Deserializable)
+                            and isinstance(value, dict)):
+                        typed_dict = {
+                            k: v if isinstance(v, val_type)
+                            else val_type.__gasp_from_partial__(v) if isinstance(v, dict)
+                            else v
+                            for k, v in value.items()
+                        }
+                        setattr(instance, key, typed_dict)
+                        continue
+
+                # Handle single nested Deserializable
                 try:
                     if isinstance(field_type, type) and issubclass(field_type, Deserializable) and isinstance(value, dict):
                         setattr(instance, key, field_type.__gasp_from_partial__(value))
                         continue
                 except TypeError:
-                    # field_type is not a class, skip the check
-                    pass
-                    
-            # Default case - set value directly
+                    pass  # field_type is not a class
+
+            # Fallback – set value directly
             setattr(instance, key, value)
         
         return instance
