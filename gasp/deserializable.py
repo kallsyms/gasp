@@ -5,52 +5,37 @@ Deserializable base class for GASP typed object deserialization.
 class Deserializable:
     """Base class for types that can be deserialized from JSON"""
     def __init__(self, **kwargs):
-        # Create instance using existing method
-        instance = self.__class__.__gasp_from_partial__(kwargs)
-        # Copy all attributes to self
-        self.__dict__.update(instance.__dict__)
-    
-    @classmethod
-    def __gasp_register__(cls):
-        """Register the type for deserialization"""
-        pass
-    
-    @classmethod
-    def __gasp_from_partial__(cls, partial_data):
-        """Create an instance from partial data"""
-        instance = cls()
-        
         # Get type annotations to check for nested types
-        annotations = getattr(cls, "__annotations__", {})
+        annotations = getattr(self.__class__, "__annotations__", {})
         
         # Initialize all annotated fields with appropriate defaults
         for field_name, field_type in annotations.items():
-            if field_name not in partial_data:
+            if field_name not in kwargs:
                 # Check if the class has a default value for this field
-                if hasattr(cls, field_name):
+                if hasattr(self.__class__, field_name):
                     # Use the class-level default
-                    default_value = getattr(cls, field_name)
-                    setattr(instance, field_name, default_value)
+                    default_value = getattr(self.__class__, field_name)
+                    setattr(self, field_name, default_value)
                 # Otherwise set default values based on type
                 elif hasattr(field_type, "__origin__"):
                     if field_type.__origin__ is list:
-                        setattr(instance, field_name, [])
+                        setattr(self, field_name, [])
                     elif field_type.__origin__ is dict:
-                        setattr(instance, field_name, {})
+                        setattr(self, field_name, {})
                     elif field_type.__origin__ is set:
-                        setattr(instance, field_name, set())
+                        setattr(self, field_name, set())
                     elif field_type.__origin__ is tuple:
-                        setattr(instance, field_name, ())
+                        setattr(self, field_name, ())
                     # For Optional/Union types, set to None
                     elif hasattr(field_type, "__args__") and type(None) in field_type.__args__:
-                        setattr(instance, field_name, None)
+                        setattr(self, field_name, None)
                 else:
                     # For regular types, set to None (caller should handle required fields)
-                    setattr(instance, field_name, None)
+                    setattr(self, field_name, None)
         
-        for key, value in partial_data.items():
+        for key, value in kwargs.items():
             # Don't overwrite an already-set meaningful value (prevents "Engineering" overriding "TechCorp")
-            current_val = getattr(instance, key, None)
+            current_val = getattr(self, key, None)
             if current_val not in (None, [], {}, (), set()):
                 continue
 
@@ -64,11 +49,11 @@ class Deserializable:
                             and isinstance(value, list)):
                         typed_list = [
                             item if isinstance(item, elem_type)
-                            else elem_type.__gasp_from_partial__(item) if isinstance(item, dict)
+                            else elem_type(**item) if isinstance(item, dict)
                             else item
                             for item in value
                         ]
-                        setattr(instance, key, typed_list)
+                        setattr(self, key, typed_list)
                         continue
 
                 # Handle dict[str, Deserializable]
@@ -78,25 +63,33 @@ class Deserializable:
                             and isinstance(value, dict)):
                         typed_dict = {
                             k: v if isinstance(v, val_type)
-                            else val_type.__gasp_from_partial__(v) if isinstance(v, dict)
+                            else val_type(**v) if isinstance(v, dict)
                             else v
                             for k, v in value.items()
                         }
-                        setattr(instance, key, typed_dict)
+                        setattr(self, key, typed_dict)
                         continue
 
                 # Handle single nested Deserializable
                 try:
                     if isinstance(field_type, type) and issubclass(field_type, Deserializable) and isinstance(value, dict):
-                        setattr(instance, key, field_type.__gasp_from_partial__(value))
+                        setattr(self, key, field_type(**value))
                         continue
                 except TypeError:
                     pass  # field_type is not a class
 
             # Fallback – set value directly
-            setattr(instance, key, value)
-        
-        return instance
+            setattr(self, key, value)
+    
+    @classmethod
+    def __gasp_register__(cls):
+        """Register the type for deserialization"""
+        pass
+    
+    @classmethod
+    def __gasp_from_partial__(cls, partial_data):
+        """Create an instance from partial data"""
+        return cls(**partial_data)
     
     def __gasp_update__(self, new_data):
         """Update instance with new data"""
