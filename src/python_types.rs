@@ -500,6 +500,7 @@ pub fn xml_to_python(
                                         } else if let Some(type_attr) = item_attrs.get("type") {
                                             // Use type attribute if no args specified
                                             match type_attr.as_str() {
+                                                "None" | "NoneType" => py.None(),
                                                 "int" => {
                                                     text.parse::<i64>().unwrap_or(0).into_py(py)
                                                 }
@@ -1369,7 +1370,16 @@ pub fn create_instance_from_xml_events(
                                     if let Some(type_val) = item_attrs.get("type") {
                                         // Find the matching union member
                                         for arg in &elem_type.args {
-                                            if &arg.name == type_val {
+                                            if &arg.name == type_val
+                                                || type_val.starts_with(&arg.name)
+                                                || arg.name.starts_with(type_val)
+                                            {
+                                                // Handle the special case where the union
+                                                // member is explicitly `None`
+                                                if arg.kind == PyTypeKind::None {
+                                                    py_list.append(py.None())?;
+                                                    break;
+                                                }
                                                 // Create instance of this specific type
                                                 if let Some(py_type) = &arg.py_type {
                                                     // Check if the type has __gasp_from_partial__ method
@@ -1572,7 +1582,10 @@ pub fn create_instance_from_xml_events(
 
             // Match by type attribute
             if let Some(ref type_val) = type_attr {
-                if &arg.name == type_val {
+                if &arg.name == type_val
+                    || type_val.starts_with(&arg.name)
+                    || arg.name.starts_with(type_val)
+                {
                     debug!("Matched union member by type attribute: {}", arg.name);
                     return create_instance_from_xml_events(py, arg, events);
                 }

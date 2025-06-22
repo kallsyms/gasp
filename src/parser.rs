@@ -158,6 +158,21 @@ impl TypedStreamParser {
                 .unwrap_or_else(PyTypeInfo::any);
             return self.push_frame_for_type(&inner_type, tag_name);
         }
+
+        // Primitive types should be represented as a simple Field frame, not a
+        // structural container frame.  Pushing a dedicated frame for a primitive
+        // like `Float` or `String` would later cause “Cannot create frame for
+        // primitive type …” errors when the parser tries to instantiate it as an
+        // object.  Instead, store an empty‐content Field here so nested text
+        // bytes get appended in `handle_stack_bytes`.
+        if type_info.is_primitive() {
+            self.stack.push(StackFrame::Field {
+                name: tag_name.to_string(),
+                content: String::new(),
+                type_info: type_info.clone(),
+            });
+            return Ok(());
+        }
         let frame = pyo3::Python::with_gil(|py| match type_info.kind {
             crate::python_types::PyTypeKind::List => {
                 let item_type = type_info
@@ -378,7 +393,11 @@ impl TypedStreamParser {
                                 field_info
                                     .args
                                     .iter()
-                                    .find(|t| &t.name == type_attr)
+                                    .find(|t| {
+                                        &t.name == type_attr
+                                            || type_attr.starts_with(&t.name)
+                                            || t.name.starts_with(type_attr)
+                                    })
                                     .cloned()
                                     .or(Some(field_info))
                             } else {
@@ -400,7 +419,11 @@ impl TypedStreamParser {
                             item_type
                                 .args
                                 .iter()
-                                .find(|t| &t.name == type_attr)
+                                .find(|t| {
+                                    &t.name == type_attr
+                                        || type_attr.starts_with(&t.name)
+                                        || t.name.starts_with(type_attr)
+                                })
                                 .cloned()
                         } else {
                             Some(item_type.clone())
@@ -464,17 +487,52 @@ impl TypedStreamParser {
         let mut pushed_new_frame = false;
         if let Some(type_info) = next_type_info {
             let mut should_push = false;
+            // Determine the concrete type we should instantiate for this tag.
+            //
+            // Special-case handling for Optional[T] which the type extractor represents as
+            // `Union[T, None]`.  Whenever the Union comprises exactly one real type plus
+            // `None`, we can safely pick the non-None member automatically instead of
+            // treating the whole tag as an abstract Union (which would otherwise skip
+            // frame creation and break scoping).  This prevents the parent object’s
+            // `current_field` from remaining stale and receiving values that belong to
+            // nested objects.
+            // Decide which concrete member of a Union we should instantiate.
+            //
+            // Order of precedence:
+            //   1. If this element specifies a `type="..."` attribute, honour it.
+            //   2. If the union is an Optional-style `Union[T, None]`, and no explicit
+            //      type attribute is given, select the non-None member automatically.
+            //   3. Otherwise, fall back to a tag-name match or keep the union abstract.
             let actual_type = if type_info.kind == crate::python_types::PyTypeKind::Union {
-                // For union types, check the type attribute to determine which member to use
+                // a) explicit type attribute
                 if let Some(type_attr) = tag.attributes.get("type") {
+                    let tattr = type_attr.as_str();
                     type_info
                         .args
                         .iter()
-                        .find(|t| &t.name == type_attr)
+                        .find(|t| {
+                            &t.name == tattr
+                                || t.name == "NoneType" && tattr == "None"
+                                || tattr.starts_with(&t.name)
+                                || t.name.starts_with(tattr)
+                        })
+                        .cloned()
+                        .unwrap_or(type_info.clone())
+                // b) Optional[T] pattern ≅ Union[T, None]
+                } else if type_info.args.len() == 2
+                    && type_info
+                        .args
+                        .iter()
+                        .any(|t| t.kind == crate::python_types::PyTypeKind::None)
+                {
+                    type_info
+                        .args
+                        .iter()
+                        .find(|t| t.kind != crate::python_types::PyTypeKind::None)
                         .cloned()
                         .unwrap_or(type_info.clone())
                 } else if type_info.args.iter().any(|t| t.name == *tag_name) {
-                    // If no type attribute but tag name matches a union member, use that
+                    // Or, if the tag name itself matches a union member
                     type_info
                         .args
                         .iter()
@@ -482,6 +540,7 @@ impl TypedStreamParser {
                         .cloned()
                         .unwrap_or(type_info.clone())
                 } else {
+                    // Fallback to treating the union abstractly
                     type_info.clone()
                 }
             } else {

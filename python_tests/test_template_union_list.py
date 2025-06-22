@@ -249,7 +249,8 @@ def test_torture_test_with_actual_parsing():
     """Test that we can actually parse a deeply nested structure"""
     
     # For now, let's use a simpler XML that focuses on the core issue
-    xml = """<Company>
+    xml = """
+    <Company>
         <name type="str">TechCorp</name>
         <departments type="list[Department]">
             <item type="Department">
