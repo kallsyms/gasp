@@ -4,6 +4,11 @@ Deserializable base class for GASP typed object deserialization.
 
 class Deserializable:
     """Base class for types that can be deserialized from JSON"""
+    def __init__(self, **kwargs):
+        # Create instance using existing method
+        instance = self.__class__.__gasp_from_partial__(kwargs)
+        # Copy all attributes to self
+        self.__dict__.update(instance.__dict__)
     
     @classmethod
     def __gasp_register__(cls):
