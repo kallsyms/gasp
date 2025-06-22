@@ -1324,8 +1324,16 @@ pub fn create_instance_from_xml_events(
                 for child in children {
                     if let XmlValue::Element(item_name, item_attrs, item_children) = child {
                         if item_name == "item" {
-                            // Check if we have a single text child
-                            if item_children.len() == 1 {
+                            // Check if the element type is a Union or Optional, if so, we must
+                            // use the more complex parsing logic below.
+                            let is_complex_item = if let Some(elem_type) = element_type {
+                                matches!(elem_type.kind, PyTypeKind::Union | PyTypeKind::Optional)
+                            } else {
+                                false
+                            };
+
+                            // Check if we have a single text child and it's not a complex type
+                            if !is_complex_item && item_children.len() == 1 {
                                 if let Some(XmlValue::Text(text)) = item_children.get(0) {
                                     let py_value = if let Some(elem_type) = element_type {
                                         // Use the typed argument
