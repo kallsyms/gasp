@@ -11,6 +11,7 @@ enum StackFrame {
         tag_name: String,
         items: Vec<PyObject>,
         item_type: PyTypeInfo,
+        depth: usize,
     },
     Dict {
         tag_name: String,
@@ -18,26 +19,32 @@ enum StackFrame {
         key_type: Option<PyTypeInfo>,
         value_type: Option<PyTypeInfo>,
         current_key: Option<PyObject>,
+        depth: usize,
     },
     Set {
         tag_name: String,
         items: Vec<PyObject>,
         item_type: PyTypeInfo,
+        depth: usize,
     },
     Tuple {
         tag_name: String,
         items: Vec<PyObject>,
         types: Vec<PyTypeInfo>,
+        depth: usize,
     },
     Object {
+        tag_name: String,
         type_info: PyTypeInfo,
         instance: PyObject,
         current_field: Option<String>,
+        depth: usize,
     },
     Field {
         name: String,
         content: String,
         type_info: PyTypeInfo,
+        depth: usize,
     },
 }
 
@@ -49,6 +56,7 @@ pub struct TypedStreamParser {
     is_done: bool,
     stack: Vec<StackFrame>,
     stack_based_result: Option<PyObject>,
+    depth: usize,
 }
 
 impl TypedStreamParser {
@@ -59,6 +67,7 @@ impl TypedStreamParser {
             is_done: false,
             stack: Vec::new(),
             stack_based_result: None,
+            depth: 0,
         }
     }
 
@@ -73,6 +82,7 @@ impl TypedStreamParser {
             is_done: false,
             stack: Vec::new(),
             stack_based_result: None,
+            depth: 0,
         }
     }
 
@@ -141,6 +151,7 @@ impl TypedStreamParser {
                                 matches!(content.to_lowercase().as_str(), "true" | "1" | "yes");
                             Ok(val.into_py(py))
                         }
+                        crate::python_types::PyTypeKind::None => Ok(py.None()),
                         _ => Ok(py.None()),
                     }
                 }
@@ -148,17 +159,27 @@ impl TypedStreamParser {
         })
     }
 
-    fn push_frame_for_type(&mut self, type_info: &PyTypeInfo, tag_name: &str) -> PyResult<()> {
-        // Handle Optional[T] by delegating to its inner type T
+    fn push_frame_for_type(
+        &mut self,
+        type_info: &PyTypeInfo,
+        tag_name: &str,
+        depth: usize,
+    ) -> PyResult<()> {
         if type_info.kind == crate::python_types::PyTypeKind::Optional {
             let inner_type = type_info
                 .args
                 .get(0)
                 .cloned()
                 .unwrap_or_else(PyTypeInfo::any);
-            return self.push_frame_for_type(&inner_type, tag_name);
+            let none_type =
+                PyTypeInfo::new(crate::python_types::PyTypeKind::None, "None".to_string())
+                    .with_module("builtins".to_string());
+            let union_type =
+                PyTypeInfo::new(crate::python_types::PyTypeKind::Union, "Union".to_string())
+                    .with_module("typing".to_string())
+                    .with_args(vec![inner_type, none_type]);
+            return self.push_frame_for_type(&union_type, tag_name, depth);
         }
-
         // Primitive types should be represented as a simple Field frame, not a
         // structural container frame.  Pushing a dedicated frame for a primitive
         // like `Float` or `String` would later cause “Cannot create frame for
@@ -170,6 +191,7 @@ impl TypedStreamParser {
                 name: tag_name.to_string(),
                 content: String::new(),
                 type_info: type_info.clone(),
+                depth,
             });
             return Ok(());
         }
@@ -184,6 +206,7 @@ impl TypedStreamParser {
                     tag_name: tag_name.to_string(),
                     items: Vec::new(),
                     item_type,
+                    depth,
                 }))
             }
             crate::python_types::PyTypeKind::Dict => {
@@ -195,6 +218,7 @@ impl TypedStreamParser {
                     key_type,
                     value_type,
                     current_key: None,
+                    depth,
                 }))
             }
             crate::python_types::PyTypeKind::Set => {
@@ -207,12 +231,14 @@ impl TypedStreamParser {
                     tag_name: tag_name.to_string(),
                     items: Vec::new(),
                     item_type,
+                    depth,
                 }))
             }
             crate::python_types::PyTypeKind::Tuple => Ok(Some(StackFrame::Tuple {
                 tag_name: tag_name.to_string(),
                 items: Vec::new(),
                 types: type_info.args.clone(),
+                depth,
             })),
             crate::python_types::PyTypeKind::Class => {
                 let instance = if let Some(py_type) = &type_info.py_type {
@@ -234,9 +260,11 @@ impl TypedStreamParser {
                     ));
                 };
                 Ok(Some(StackFrame::Object {
+                    tag_name: tag_name.to_string(),
                     type_info: type_info.clone(),
                     instance: instance.into(),
                     current_field: None,
+                    depth,
                 }))
             }
             crate::python_types::PyTypeKind::Union => {
@@ -297,7 +325,7 @@ impl TypedStreamParser {
                         current_field,
                         ..
                     } => {
-                        if let Some(field_name) = current_field {
+                        if let Some(field_name) = current_field.take() {
                             pyo3::Python::with_gil(|py| {
                                 let _ = instance.as_ref(py).setattr(field_name.as_str(), py_object);
                             });
@@ -362,7 +390,6 @@ impl TypedStreamParser {
             match frame {
                 StackFrame::Object { type_info, .. } => {
                     if let Some(field_info) = type_info.fields.get(tag_name) {
-                        // If the field is Optional, convert it to Union[T, None]
                         let field_info =
                             if field_info.kind == crate::python_types::PyTypeKind::Optional {
                                 // Convert Optional[T] to Union[T, None]
@@ -386,7 +413,6 @@ impl TypedStreamParser {
                             } else {
                                 field_info.clone()
                             };
-
                         // If the field is a union type, check the type attribute
                         if field_info.kind == crate::python_types::PyTypeKind::Union {
                             if let Some(type_attr) = tag.attributes.get("type") {
@@ -414,15 +440,38 @@ impl TypedStreamParser {
                 }
                 StackFrame::List { item_type, .. } if tag_name == "item" => {
                     // Check if the item_type is a Union and if so, use the type attribute
+                    let item_type = if item_type.kind == crate::python_types::PyTypeKind::Optional {
+                        // Convert Optional[T] to Union[T, None]
+                        let inner_type = item_type
+                            .args
+                            .get(0)
+                            .cloned()
+                            .unwrap_or_else(|| PyTypeInfo::any());
+                        let none_type = PyTypeInfo::new(
+                            crate::python_types::PyTypeKind::None,
+                            "None".to_string(),
+                        )
+                        .with_module("builtins".to_string());
+
+                        PyTypeInfo::new(crate::python_types::PyTypeKind::Union, "Union".to_string())
+                            .with_module("typing".to_string())
+                            .with_args(vec![inner_type, none_type])
+                    } else {
+                        item_type.clone()
+                    };
+
                     if item_type.kind == crate::python_types::PyTypeKind::Union {
                         if let Some(type_attr) = tag.attributes.get("type") {
                             item_type
                                 .args
                                 .iter()
                                 .find(|t| {
-                                    &t.name == type_attr
-                                        || type_attr.starts_with(&t.name)
-                                        || t.name.starts_with(type_attr)
+                                    let tattr = type_attr.as_str();
+                                    &t.name == tattr
+                                        || (t.name == "None"
+                                            && (tattr == "None" || tattr == "NoneType"))
+                                        || tattr.starts_with(&t.name)
+                                        || t.name.starts_with(tattr)
                                 })
                                 .cloned()
                         } else {
@@ -512,7 +561,7 @@ impl TypedStreamParser {
                         .iter()
                         .find(|t| {
                             &t.name == tattr
-                                || t.name == "NoneType" && tattr == "None"
+                                || (t.name == "None" && (tattr == "None" || tattr == "NoneType"))
                                 || tattr.starts_with(&t.name)
                                 || t.name.starts_with(tattr)
                         })
@@ -547,20 +596,7 @@ impl TypedStreamParser {
                 type_info.clone()
             };
 
-            if self.stack.is_empty() {
-                // For root level, check if the tag matches the expected type (case-insensitive)
-                let type_name_lower = actual_type.name.to_lowercase();
-                let tag_name_lower = tag_name.to_lowercase();
-                if type_name_lower == tag_name_lower
-                    || (tag_name_lower == "list"
-                        && actual_type.kind == crate::python_types::PyTypeKind::List)
-                {
-                    should_push = true;
-                }
-            } else {
-                // For nested tags (like items in a list), always push if we have a type
-                should_push = true;
-            }
+            should_push = true;
 
             if should_push {
                 // Push the new frame.
@@ -569,10 +605,11 @@ impl TypedStreamParser {
                         name: tag_name.clone(),
                         content: String::new(),
                         type_info: actual_type,
+                        depth: tag.depth,
                     });
                     pushed_new_frame = true;
                 } else {
-                    self.push_frame_for_type(&actual_type, tag_name)?;
+                    self.push_frame_for_type(&actual_type, tag_name, tag.depth)?;
                     pushed_new_frame = true;
                 }
             }
@@ -612,135 +649,76 @@ impl TypedStreamParser {
         Ok(())
     }
 
-    fn handle_stack_tag_close(&mut self, tag_name: &str) -> PyResult<()> {
-        debug!("handle_stack_tag_close: tag_name={}", tag_name);
-
-        // Debug: print current stack state before processing
-        debug!("Stack state before processing close tag:");
-        for (i, frame) in self.stack.iter().enumerate() {
-            match frame {
-                StackFrame::Object {
-                    type_info,
-                    current_field,
-                    ..
-                } => {
-                    debug!(
-                        "  Stack[{}]: Object(type={}, current_field={:?})",
-                        i, type_info.name, current_field
-                    );
-                }
-                StackFrame::Field { name, .. } => {
-                    debug!("  Stack[{}]: Field(name={})", i, name);
-                }
-                _ => {
-                    debug!("  Stack[{}]: {:?}", i, frame);
-                }
-            }
+    fn handle_stack_tag_close(&mut self, tag_name: &str, depth: usize) -> PyResult<()> {
+        debug!(
+            "handle_stack_tag_close: tag_name={}, depth={}, stack_len={}",
+            tag_name,
+            depth,
+            self.stack.len()
+        );
+        if let Some(top) = self.stack.last() {
+            debug!("  top_frame: {:?}", top);
         }
 
-        let mut child_object = None;
-
-        // Check if the closing tag matches the top of the stack (case-insensitive).
-        let tag_name_lower = tag_name.to_lowercase();
-        let should_pop = if let Some(top_frame) = self.stack.last() {
-            match top_frame {
-                StackFrame::Field { name, .. } => name.to_lowercase() == tag_name_lower,
-                StackFrame::Object { type_info, .. } => {
-                    // For objects, check if the tag matches the type name
-                    // OR if this is a field closing tag and the parent has that field
-                    type_info.name.to_lowercase() == tag_name_lower
-                        || (self.stack.len() > 1
-                            && match &self.stack[self.stack.len() - 2] {
-                                StackFrame::Object {
-                                    type_info: parent_type,
-                                    ..
-                                } => parent_type.fields.contains_key(tag_name),
-                                StackFrame::List { .. }
-                                | StackFrame::Set { .. }
-                                | StackFrame::Tuple { .. }
-                                | StackFrame::Dict { .. } => tag_name_lower == "item",
-                                _ => false,
-                            })
-                }
+        if let Some(top_frame) = self.stack.last() {
+            let (frame_tag_name, frame_depth) = match top_frame {
                 StackFrame::List {
-                    tag_name: list_tag, ..
-                } => list_tag.to_lowercase() == tag_name_lower,
-                StackFrame::Set {
-                    tag_name: set_tag, ..
-                } => set_tag.to_lowercase() == tag_name_lower,
-                StackFrame::Tuple {
-                    tag_name: tuple_tag,
-                    ..
-                } => tuple_tag.to_lowercase() == tag_name_lower,
+                    tag_name, depth, ..
+                } => (tag_name.clone(), *depth),
                 StackFrame::Dict {
-                    tag_name: dict_tag, ..
-                } => dict_tag.to_lowercase() == tag_name_lower,
-            }
-        } else {
-            false
-        };
-
-        if should_pop {
-            let child_frame = self.stack.pop().unwrap();
-            child_object = Some(self.frame_to_pyobject(child_frame)?);
-        }
-
-        // If we popped a frame and got an object, we need to add it to its parent.
-        if let Some(obj) = child_object {
-            if let Some(parent_frame) = self.stack.last_mut() {
-                match parent_frame {
-                    StackFrame::List { items, .. } => items.push(obj),
-                    StackFrame::Set { items, .. } => items.push(obj),
-                    StackFrame::Tuple { items, .. } => items.push(obj),
-                    StackFrame::Dict {
-                        entries,
-                        current_key,
-                        ..
-                    } => {
-                        // For dict items, use the current_key that was stored when the item was opened
-                        if let Some(key) = current_key.take() {
-                            entries.push((key, obj));
-                        } else {
-                            debug!("Dict item closed but no key was stored");
-                        }
-                    }
-                    StackFrame::Object {
-                        instance,
-                        current_field,
-                        ..
-                    } => {
-                        // Use the `current_field` that was set when the tag was opened.
-                        if let Some(field_name) = current_field.take() {
-                            debug!("Setting field '{}' on object", field_name);
-                            pyo3::Python::with_gil(|py| {
-                                let _ = instance.as_ref(py).setattr(field_name.as_str(), obj);
-                            });
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                // No parent, this is the root object.
-                self.stack_based_result = Some(obj);
-                self.is_done = true;
-            }
-        } else if self.stack.len() == 1 {
-            // This handles the case where the root object itself is closing.
-            let top_frame_name = if let Some(frame) = self.stack.last() {
-                match frame {
-                    StackFrame::Object { type_info, .. } => Some(type_info.name.clone()),
-                    _ => None,
-                }
-            } else {
-                None
+                    tag_name, depth, ..
+                } => (tag_name.clone(), *depth),
+                StackFrame::Set {
+                    tag_name, depth, ..
+                } => (tag_name.clone(), *depth),
+                StackFrame::Tuple {
+                    tag_name, depth, ..
+                } => (tag_name.clone(), *depth),
+                StackFrame::Object {
+                    tag_name, depth, ..
+                } => (tag_name.clone(), *depth),
+                StackFrame::Field { name, depth, .. } => (name.clone(), *depth),
             };
 
-            if let Some(frame_name) = top_frame_name {
-                if frame_name.to_lowercase() == tag_name.to_lowercase() {
-                    if let Some(frame) = self.stack.pop() {
-                        self.stack_based_result = Some(self.frame_to_pyobject(frame)?);
-                        self.is_done = true;
+            // Strict check: only pop if the tag name and depth match.
+            // This avoids the infinite loop that could happen with the while loop.
+            if frame_depth == depth && frame_tag_name.to_lowercase() == tag_name.to_lowercase() {
+                let child_frame = self.stack.pop().unwrap();
+                let child_object = self.frame_to_pyobject(child_frame)?;
+
+                if let Some(parent_frame) = self.stack.last_mut() {
+                    match parent_frame {
+                        StackFrame::List { items, .. } => items.push(child_object),
+                        StackFrame::Set { items, .. } => items.push(child_object),
+                        StackFrame::Tuple { items, .. } => items.push(child_object),
+                        StackFrame::Dict {
+                            entries,
+                            current_key,
+                            ..
+                        } => {
+                            if let Some(key) = current_key.take() {
+                                entries.push((key, child_object));
+                            }
+                        }
+                        StackFrame::Object {
+                            instance,
+                            current_field,
+                            ..
+                        } => {
+                            if let Some(field_name) = current_field.take() {
+                                pyo3::Python::with_gil(|py| {
+                                    let _ = instance
+                                        .as_ref(py)
+                                        .setattr(field_name.as_str(), child_object);
+                                });
+                            }
+                        }
+                        _ => {}
                     }
+                } else {
+                    // No parent, this is the root object.
+                    self.stack_based_result = Some(child_object);
+                    self.is_done = true;
                 }
             }
         }
@@ -777,9 +755,13 @@ impl TypedStreamParser {
         if self.should_use_stack() {
             for event in &events {
                 match event {
-                    crate::tag_finder::TagEvent::Open(tag) => self.handle_stack_tag_open(tag)?,
-                    crate::tag_finder::TagEvent::Close(name) => {
-                        self.handle_stack_tag_close(name)?
+                    crate::tag_finder::TagEvent::Open(tag) => {
+                        self.depth = tag.depth;
+                        self.handle_stack_tag_open(tag)?
+                    }
+                    crate::tag_finder::TagEvent::Close(name, depth) => {
+                        self.depth = *depth;
+                        self.handle_stack_tag_close(name, *depth)?
                     }
                     crate::tag_finder::TagEvent::Bytes(content) => {
                         self.handle_stack_bytes(content)?
@@ -807,6 +789,7 @@ impl TypedStreamParser {
                                     name: tag.name.clone(),
                                     content: String::new(),
                                     type_info: type_info.clone(),
+                                    depth: tag.depth,
                                 });
                             }
                         }
@@ -819,7 +802,7 @@ impl TypedStreamParser {
                                 field_content.push_str(content);
                             }
                         }
-                        crate::tag_finder::TagEvent::Close(name) => {
+                        crate::tag_finder::TagEvent::Close(name, _) => {
                             if name.to_lowercase() == type_info.name.to_lowercase()
                                 && !self.stack.is_empty()
                             {
@@ -837,7 +820,10 @@ impl TypedStreamParser {
                 // Return partial results for primitives
                 if !self.stack.is_empty() {
                     if let Some(StackFrame::Field {
-                        content, type_info, ..
+                        content,
+                        type_info,
+                        depth,
+                        ..
                     }) = self.stack.last()
                     {
                         // Build a partial result from the current content
@@ -845,6 +831,7 @@ impl TypedStreamParser {
                             name: type_info.name.clone(),
                             content: content.clone(),
                             type_info: type_info.clone(),
+                            depth: *depth,
                         })?;
                         return Ok(Some(partial));
                     }

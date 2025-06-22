@@ -9,18 +9,20 @@ use std::collections::HashMap;
 pub struct Tag {
     pub name: String,
     pub attributes: HashMap<String, String>,
+    pub depth: usize,
 }
 
 #[derive(Debug, Clone)]
 pub enum TagEvent {
-    Open(Tag),     // <Tag>
-    Bytes(String), // payload
-    Close(String), // </Tag>
+    Open(Tag),            // <Tag>
+    Bytes(String),        // payload
+    Close(String, usize), // </Tag>
 }
 
 #[derive(Debug)]
 pub struct TagFinder {
     buf: String,                                // carries over up to a whole unfinished tag
+    depth: usize,                               // current tag depth
     inside: bool,                               // true ⇢ we're between <Tag> … </Tag>
     wanted: std::collections::HashSet<String>, // tags we specifically want to process (empty = all)
     ignored: std::collections::HashSet<String>, // tags to ignore content within
@@ -32,6 +34,7 @@ impl Default for TagFinder {
     fn default() -> Self {
         Self {
             buf: String::new(),
+            depth: 0,
             inside: false,
             wanted: std::collections::HashSet::new(),
             ignored: std::collections::HashSet::new(),
@@ -66,6 +69,7 @@ impl TagFinder {
         );
         Self {
             buf: String::new(),
+            depth: 0,
             inside: false,
             wanted: wanted_set,
             ignored: ignored_set,
@@ -86,7 +90,7 @@ impl TagFinder {
         debug!("[TagFinder::push] Received chunk: '{}'", chunk);
         self.buf.push_str(chunk);
         debug!("[TagFinder::push] Current buffer: '{}'", self.buf);
-        debug!("[TagFinder::push] Current state: inside={}, inside_ignored={}, ignored_depth={}, wanted={:?}, ignored={:?}", self.inside, self.inside_ignored, self.ignored_depth, self.wanted, self.ignored);
+        debug!("[TagFinder::push] Current state: depth={}, inside={}, inside_ignored={}, ignored_depth={}, wanted={:?}, ignored={:?}", self.depth, self.inside, self.inside_ignored, self.ignored_depth, self.wanted, self.ignored);
 
         loop {
             debug!("[TagFinder::push] Loop start. Buffer: '{}'", self.buf);
@@ -238,7 +242,11 @@ impl TagFinder {
 
             if !is_close {
                 /* <Tag> : opening tag */
-                debug!("[TagFinder::push] Processing Open Tag: '{}'", name);
+                self.depth += 1;
+                debug!(
+                    "[TagFinder::push] Processing Open Tag: '{}' at depth {}",
+                    name, self.depth
+                );
                 if is_ignored {
                     self.inside_ignored = true;
                     self.ignored_depth += 1;
@@ -252,12 +260,14 @@ impl TagFinder {
                     emit(TagEvent::Open(Tag {
                         name: name.clone(),
                         attributes,
+                        depth: self.depth,
                     }))?;
                 } else if is_wanted && !self.inside_ignored {
                     debug!("[TagFinder::push] Emitting Open for wanted tag: '{}'", name);
                     emit(TagEvent::Open(Tag {
                         name: name.clone(),
                         attributes,
+                        depth: self.depth,
                     }))?;
                     if !self.inside {
                         self.inside = true;
@@ -276,7 +286,10 @@ impl TagFinder {
                 }
             } else {
                 /* </Tag> : closing tag */
-                debug!("[TagFinder::push] Processing Close Tag: '{}'", name);
+                debug!(
+                    "[TagFinder::push] Processing Close Tag: '{}' at depth {}",
+                    name, self.depth
+                );
                 if is_ignored && self.inside_ignored {
                     self.ignored_depth -= 1;
                     if self.ignored_depth == 0 {
@@ -289,9 +302,9 @@ impl TagFinder {
                         "[TagFinder::push] Emitting Close for nested tag inside wanted tag: '{}'",
                         name
                     );
-                    emit(TagEvent::Close(name.clone()))?;
+                    emit(TagEvent::Close(name.clone(), self.depth))?;
                     // Only set inside=false if this is closing the main wanted tag
-                    if is_wanted {
+                    if is_wanted && self.depth == 1 {
                         self.inside = false;
                         debug!(
                             "[TagFinder::push] Set self.inside = false for wanted tag '{}'",
@@ -303,14 +316,19 @@ impl TagFinder {
                         "[TagFinder::push] Emitting Close for wanted tag: '{}'",
                         name
                     );
-                    emit(TagEvent::Close(name.clone()))?;
-                    self.inside = false; // Assuming this closes the primary wanted tag
-                    debug!(
-                        "[TagFinder::push] Set self.inside = false for tag '{}'",
-                        name
-                    );
+                    emit(TagEvent::Close(name.clone(), self.depth))?;
+                    if self.depth == 1 {
+                        self.inside = false; // Assuming this closes the primary wanted tag
+                        debug!(
+                            "[TagFinder::push] Set self.inside = false for tag '{}'",
+                            name
+                        );
+                    }
                 } else {
                     debug!("[TagFinder::push] Close Tag '{}' is not wanted or currently inside ignored. is_wanted={}, inside_ignored={}", name, is_wanted, self.inside_ignored);
+                }
+                if self.depth > 0 {
+                    self.depth -= 1;
                 }
             }
 
@@ -387,8 +405,8 @@ mod tests {
         // Check that the ReportSub tag was recognized in some form
         let mut found_tag = false;
         for event in &events {
-            if let TagEvent::Open(name) = event {
-                if name == "ReportSub" {
+            if let TagEvent::Open(tag) = event {
+                if tag.name == "ReportSub" {
                     found_tag = true;
                     break;
                 }
@@ -415,7 +433,7 @@ mod tests {
 
         for event in &events {
             match event {
-                TagEvent::Close(name) if name == "ReportSub" => has_close = true,
+                TagEvent::Close(name, _) if name == "ReportSub" => has_close = true,
                 TagEvent::Bytes(_) => has_bytes = true,
                 _ => {}
             }
@@ -465,8 +483,8 @@ mod tests {
         // Check for any Open event
         let mut has_open_report = false;
         for event in &events {
-            if let TagEvent::Open(name) = event {
-                if name == "ReportSub" {
+            if let TagEvent::Open(tag) = event {
+                if tag.name == "ReportSub" {
                     has_open_report = true;
                     break;
                 }
@@ -497,7 +515,7 @@ mod tests {
         // Check for a Close event
         let mut has_close = false;
         for event in &events {
-            if let TagEvent::Close(name) = event {
+            if let TagEvent::Close(name, _) = event {
                 if name == "ReportSub" {
                     has_close = true;
                     break;
@@ -549,9 +567,9 @@ mod tests {
 
         for event in &events {
             match event {
-                TagEvent::Open(name) => open_tags.push(name.clone()),
+                TagEvent::Open(tag) => open_tags.push(tag.name.clone()),
                 TagEvent::Bytes(content) => content_chunks.push(content.clone()),
-                TagEvent::Close(name) => close_tags.push(name.clone()),
+                TagEvent::Close(name, _) => close_tags.push(name.clone()),
             }
         }
 
@@ -632,9 +650,9 @@ mod tests {
 
         for event in &events {
             match event {
-                TagEvent::Open(name) => open_tags.push(name.clone()),
+                TagEvent::Open(tag) => open_tags.push(tag.name.clone()),
                 TagEvent::Bytes(text) => content.push_str(text),
-                TagEvent::Close(name) => close_tags.push(name.clone()),
+                TagEvent::Close(name, _) => close_tags.push(name.clone()),
             }
         }
 
@@ -705,9 +723,9 @@ mod tests {
 
         for event in &events {
             match event {
-                TagEvent::Open(name) => open_tags.push(name.clone()),
+                TagEvent::Open(tag) => open_tags.push(tag.name.clone()),
                 TagEvent::Bytes(content) => content_chunks.push(content.clone()),
-                TagEvent::Close(name) => close_tags.push(name.clone()),
+                TagEvent::Close(name, _) => close_tags.push(name.clone()),
             }
         }
 
