@@ -158,8 +158,11 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
                 item_type = args[0]
                 item_type_name = _get_type_name(item_type)
                 if _is_class_type(item_type):
-                    item_content = f"\n            {_format_class_fields(item_type, indent='            ')}\n        "
+                    item_class_name = getattr(item_type, "__name__", "Object")
+                    item_content = f"\n            ...{item_class_name} fields...\n        "
                     item_format = f'<item type="{item_type_name}">{item_content}</item>'
+                    if item_class_name not in structure_examples:
+                        structure_examples[item_class_name] = _generate_class_structure_example(item_type)
                 else:
                     item_example = _get_example_value(item_type)
                     item_format = f'<item type="{item_type_name}">{item_example}</item>'
@@ -173,8 +176,11 @@ def _format_class_type(cls: Type, tag_name: str, structure_examples: Dict[str, s
                 key_type, value_type = args
                 value_type_name = _get_type_name(value_type)
                 if _is_class_type(value_type):
-                    value_content = f"\n            {_format_class_fields(value_type, indent='            ')}\n        "
+                    value_class_name = getattr(value_type, "__name__", "Object")
+                    value_content = f"\n            ...{value_class_name} fields...\n        "
                     item_format = f'<item key="example_key" type="{value_type_name}">{value_content}</item>'
+                    if value_class_name not in structure_examples:
+                        structure_examples[value_class_name] = _generate_class_structure_example(value_type)
                 else:
                     value_example = _get_example_value(value_type)
                     item_format = f'<item key="example_key" type="{value_type_name}">{value_example}</item>'
