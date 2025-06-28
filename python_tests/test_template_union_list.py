@@ -475,3 +475,83 @@ def test_type_alias_with_type_statement():
     
     # Check the list type attribute - it should show the expanded union
     assert 'type="list[Chat | IssueForm | WaitForConfirmation]"' in instructions
+
+
+def test_daneel_style_union_list():
+    """Test a complex List[Union[...]] type string like the one from the bug report"""
+
+    # --- Mock classes to replicate the structure without actual imports ---
+    class MockTool1(Deserializable):
+        param1: str
+
+    class MockTool2(Deserializable):
+        param2: int
+
+    # AgentAction is itself a Union
+    AgentAction = Union[MockTool1, MockTool2]
+
+    class MCPListfilescodeTool(Deserializable):
+        path: str
+        recursive: bool
+
+    class MCPReadfilecodeTool(Deserializable):
+        path: str
+
+    class MCPCreatefilecodeTool(Deserializable):
+        path: str
+        content: str
+
+    class MCPReplacelinescodeTool(Deserializable):
+        path: str
+        start_line: int
+        end_line: int
+        content: str
+
+    class MCPExecuteshellcommandcodeTool(Deserializable):
+        command: str
+
+    class MCPGetdiagnosticscodeTool(Deserializable):
+        pass
+
+    class MCPSearchsymbolscodeTool(Deserializable):
+        query: str
+
+    class MCPGetsymboldefinitioncodeTool(Deserializable):
+        symbol: str
+
+    class MCPGetdocumentsymbolscodeTool(Deserializable):
+        path: str
+    # --- End of mock classes ---
+
+    # This is the complex type that was failing
+    daneel_action = List[
+        Union[
+            AgentAction,
+            MCPListfilescodeTool,
+            MCPReadfilecodeTool,
+            MCPCreatefilecodeTool,
+            MCPReplacelinescodeTool,
+            MCPExecuteshellcommandcodeTool,
+            MCPGetdiagnosticscodeTool,
+            MCPSearchsymbolscodeTool,
+            MCPGetsymboldefinitioncodeTool,
+            MCPGetdocumentsymbolscodeTool,
+        ]
+    ]
+
+    instructions = type_to_format_instructions(daneel_action)
+
+    print("\n=== Daneel Style Union List Test ===")
+    print(instructions)
+    print("=== End ===\n")
+
+    # Check that the outer list type is correct and contains all flattened union members
+    # AgentAction (Union[MockTool1, MockTool2]) should be expanded
+    assert 'type="list[MockTool1 | MockTool2 | MCPListfilescodeTool | MCPReadfilecodeTool | MCPCreatefilecodeTool | MCPReplacelinescodeTool | MCPExecuteshellcommandcodeTool | MCPGetdiagnosticscodeTool | MCPSearchsymbolscodeTool | MCPGetsymboldefinitioncodeTool | MCPGetdocumentsymbolscodeTool]"' in instructions
+
+    # Check that we have structure examples for some of the tool classes
+    assert "When you see 'MCPListfilescodeTool' in a type attribute" in instructions
+    assert "When you see 'MockTool1' in a type attribute" in instructions
+    assert "When you see 'MockTool2' in a type attribute" in instructions
+    # Should NOT have AgentAction since it should be expanded
+    assert "When you see 'AgentAction' in a type attribute" not in instructions

@@ -91,6 +91,10 @@ def type_to_format_instructions(type_obj: Any, name: Optional[str] = None, inclu
         if type_obj is bool:
             return tag_name, f'<{tag_name} type="bool">true</{tag_name}>'
         
+        # Handle Any type
+        if type_obj is Any or type_obj is typing.Any:
+            return tag_name, f'<{tag_name} type="Any">any value</{tag_name}>'
+        
         # Handle classes (objects with fields)
         return tag_name, _format_class_type(type_obj, tag_name, structure_examples)
     
@@ -419,8 +423,36 @@ def _format_list_type(list_type: Type, tag_name: str, structure_examples: Dict[s
             union_args = get_args(actual_item_type)
         
         # Add structure examples for each union member that is a class
+        # Also handle type aliases that resolve to unions
         for arg in union_args:
-            if arg is not type(None) and _is_class_type(arg):
+            if arg is type(None):
+                continue
+                
+            # Check if this arg is a type alias that resolves to a Union
+            if hasattr(arg, '__value__'):
+                actual_arg = arg.__value__
+                arg_origin = get_origin(actual_arg)
+                
+                # If it's a Union or UnionType, recursively expand it
+                if arg_origin is Union or type(actual_arg).__name__ == 'UnionType':
+                    if type(actual_arg).__name__ == 'UnionType':
+                        nested_args = actual_arg.__args__
+                    else:
+                        nested_args = get_args(actual_arg)
+                    
+                    # Recursively process nested union members
+                    for nested_arg in nested_args:
+                        if nested_arg is not type(None) and _is_class_type(nested_arg):
+                            nested_arg_name = getattr(nested_arg, "__name__", "Object")
+                            if nested_arg_name not in structure_examples:
+                                structure_examples[nested_arg_name] = _generate_class_structure_example(nested_arg, structure_examples)
+                # If it's not a union, but still a class type
+                elif _is_class_type(actual_arg):
+                    arg_name = getattr(actual_arg, "__name__", "Object")
+                    if arg_name not in structure_examples:
+                        structure_examples[arg_name] = _generate_class_structure_example(actual_arg, structure_examples)
+            # Regular class type (not a type alias)
+            elif _is_class_type(arg):
                 arg_name = getattr(arg, "__name__", "Object")
                 if arg_name not in structure_examples:
                     structure_examples[arg_name] = _generate_class_structure_example(arg, structure_examples)
@@ -458,6 +490,11 @@ def _format_list_type(list_type: Type, tag_name: str, structure_examples: Dict[s
         return f'<{tag_name} type="list[{item_type_name}]">\n    <item type="{item_type_name}">\n        ...{class_name} fields...\n    </item>\n    <item type="{item_type_name}">\n        ...{class_name} fields...\n    </item>\n    ...\n</{tag_name}>'
     else:
         # For lists of simple types
+        # Special handling for Any type
+        if item_type is Any or item_type is typing.Any:
+            # For Any type, show it similar to unions - suggesting any type can be used
+            return f'<{tag_name} type="list[Any]">\n    <item type="... any type (str | int | float | bool | dict | list | custom objects | etc.) ...">...</item>\n    <item type="... any type (str | int | float | bool | dict | list | custom objects | etc.) ...">...</item>\n    ...\n</{tag_name}>'
+        
         item_example = _get_example_value(item_type)
         return f'<{tag_name} type="list[{item_type_name}]">\n    <item type="{item_type_name}">{item_example}</item>\n    <item type="{item_type_name}">{item_example}</item>\n    ...\n</{tag_name}>'
 
@@ -526,6 +563,10 @@ def _is_class_type(type_obj: Type) -> bool:
     """Determine if a type is a class type (not a primitive or generic)."""
     # Primitive types are not classes
     if type_obj in (str, int, float, bool, type(None)):
+        return False
+    
+    # Special types that should not be treated as classes
+    if type_obj is Any or type_obj is typing.Any:
         return False
     
     # Check if it's a generic type
