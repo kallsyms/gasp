@@ -1,44 +1,45 @@
-# GASP - Type-Safe LLM Output Parser
+# GASP - A Type-Safe, Streaming XML-to-Object Parser for Python
 
-> **⚠️ MAJOR BREAKING CHANGES IN VERSION 1.0.0 ⚠️**  
-> Version 1.0.0 is a complete rewrite that removes WAIL entirely and introduces a new tag-based parsing approach.  
-> If you're using an older version of GASP, you'll need to significantly change your code to upgrade.  
-> See the [Migration Guide](#migrating-from-pre-10-versions) below.
-
-GASP is a Rust-based parser for turning LLM outputs into properly typed Python objects. It handles streaming JSON fragments, recovers from common LLM quirks, and makes structured data extraction actually pleasant.
+GASP is a library for parsing structured XML from Large Language Model (LLM) outputs directly into typed Python objects. It uses your Python type hints to drive the parsing process, providing a robust and intuitive way to work with structured data from LLMs.
 
 ## The Problem
 
-LLMs are great at generating structured data when asked, but not perfect:
+LLMs are proficient at generating structured data, but they often embed it within natural language and the format can be inconsistent. You want to extract a complex Python object, but you get something like this:
 
 ```
+Of course! Here is the information about the person you requested:
+
 <Person>
-{
-  "name": "Alice Smith",
-  "age": 30,
-  hobbies: ["coding", "hiking"]
-}
+  <name>Alice</name>
+  <age>30</age>
+  <hobbies>
+    <item>coding</item>
+    <item>hiking</item>
+  </hobbies>
 </Person>
+
+I hope this is helpful!
 ```
 
-That output has unquoted keys, inconsistent formatting, and is embedded in natural language. Most JSON parsers just give up.
+GASP is designed to solve this exact problem. It ignores the surrounding text, finds the `<Person>` tag, and uses your `Person` class definition to parse the nested XML into a valid Python object.
 
 ## How GASP Works
 
-GASP uses a tag-based approach to extract and type-cast structured data:
+GASP uses a type-directed XML parsing strategy. The structure of your Python classes tells the parser what to expect in the XML stream.
 
-1. Tags like `<Person>...</Person>` mark where the structured data lives (and what type it is)
-2. The parser ignores everything outside those tags
-3. Inside the tags, it handles messy JSON with broken quotes, trailing commas, etc.
-4. The data gets converted into proper Python objects based on type annotations
+1.  **Type-Driven Matching**: GASP maps your Python class names to XML root tags (e.g., `class Person` matches `<Person>`).
+2.  **Field-Driven Parsing**: It maps class attribute names to nested XML tags (e.g., `person.name` matches `<name>...</name>`).
+3.  **Streaming & Incremental**: The parser processes data as it arrives, handling XML tags that are split across multiple chunks.
+4.  **Object Instantiation**: It incrementally builds your Python objects as it successfully parses the XML, setting attributes as their corresponding tags are closed.
 
 ## Features
 
-- **Tag-Based Extraction**: Extract structured data even when surrounded by explanatory text
-- **Streaming Support**: Process data incrementally as it arrives from the LLM
-- **Type Inference**: Automatically match JSON objects to Python classes
-- **Error Recovery**: Handle common JSON mistakes that LLMs make
-- **Pydantic Integration**: Works with Pydantic for validation and schema definition
+-   **Type-Directed Parsing**: Your Python type hints (`str`, `int`, `List`, `Union`, custom classes) are the single source of truth for the parser.
+-   **Streaming XML Engine**: A high-performance Rust core handles partial data and tags split across chunks, making it ideal for real-time applications.
+-   **Nested Object & Collection Support**: Naturally parses complex, nested XML structures into corresponding Python objects and collections (`List`, `Dict`, `Set`, `Tuple`).
+-   **Union Type Resolution**: Intelligently selects the correct type from a `Union` based on the XML tag encountered in the stream.
+-   **Automatic Tag Filtering**: Ignores common LLM "thinking" tags (e.g., `<think>`, `<system>`) by default, so you only get the data you want.
+-   **Pydantic Integration**: First-class support for parsing data directly into Pydantic models.
 
 ## Installation
 
@@ -48,297 +49,166 @@ pip install gasp-py
 
 ## Quick Example
 
-```python
-from gasp import Parser
-from typing import List, Optional
+Define your Python class. The class name and attribute names will be used to match the XML tags.
 
-# Regular classes work now - no need for Deserializable
-class Address:
-    def __init__(self, street="", city="", zip_code=""):
-        self.street = street
-        self.city = city
-        self.zip_code = zip_code
+```python
+# models.py
+from typing import List
 
 class Person:
-    def __init__(self, name="", age=0, address=None, hobbies=None):
-        self.name = name
-        self.age = age
-        self.address = address or Address()
-        self.hobbies = hobbies or []
+    name: str
+    age: int
+    hobbies: List[str]
+```
+
+Now, use the `Parser` to process LLM output containing XML that matches your class structure.
+
+```python
+from gasp import Parser
+from models import Person
+
+llm_output = """
+Here is the data you requested.
+<Person>
+  <name>Alice</name>
+  <age>30</age>
+  <hobbies>
+    <item>coding</item>
+    <item>hiking</item>
+  </hobbies>
+</Person>
+"""
 
 # Create a parser for the Person type
 parser = Parser(Person)
 
-# Process LLM output chunks as they arrive
-chunks = [
-    '<Person>{"name": "Alice", "age": 30',
-    ', "address": {"street": "123 Main St", "city": "Springfield"',
-    ', "zip_code": "12345"}, "hobbies": ["reading", "coding"]}</Person>'
-]
-
-for chunk in chunks:
-    result = parser.feed(chunk)
-    print(result)  # Will show partial objects as they're built
-
-# Get the final validated result
+# Feed the LLM output to the parser
+parser.feed(llm_output)
 person = parser.validate()
-print(f"Hello {person.name}!")  # Hello Alice!
+
+# The 'person' variable is now a fully typed Python object
+print(f"{person.name} is {person.age} and enjoys {', '.join(person.hobbies)}.")
+# Output: Alice is 30 and enjoys coding, hiking.
 ```
 
-### Container Types
+## XML Structure Guide
 
-Lists and tuples get their own tags:
+GASP expects the XML structure to mirror your Python class definitions.
+
+### Primitives
+
+Primitive types are parsed from the text content of a tag.
 
 ```python
-# List[T] uses <list> tag
-parser = Parser(List[int])
-result = parser.feed('<list>[1, 2, 3]</list>')  # returns [1, 2, 3]
-
-# Tuple[T, ...] uses <tuple> tag  
-parser = Parser(Tuple[str, int, bool])
-result = parser.feed('<tuple>["hello", 42, true]</tuple>')  # returns ("hello", 42, True)
+class Book:
+    title: str  # <title>The Great Gatsby</title>
+    pages: int  # <pages>180</pages>
 ```
 
-## Using Deserializable for Advanced Streaming
+### Lists and Sets
 
-Regular classes work for most use cases. Use `Deserializable` when you need:
-
-- **Streaming control**: React to data as it arrives
-- **Custom validation**: Validate/transform data during parsing  
-- **State management**: Maintain computed fields or derived state
+Lists and Sets are parsed from a container tag containing multiple `<item>` tags.
 
 ```python
-from gasp import Deserializable
+class ShoppingList:
+    items: List[str]
 
-class LiveDashboard(Deserializable):
-    def __init__(self):
-        self.events = []
-        self.summary_stats = {}
-    
-    def __gasp_update__(self, partial_data):
-        # React to streaming updates
-        if 'new_event' in partial_data:
-            self.events.append(partial_data['new_event'])
-            self._recalculate_stats()
-    
-    @classmethod
-    def __gasp_from_partial__(cls, partial_data):
-        # Custom instantiation logic
-        instance = cls()
-        # Apply defaults, validate, etc.
-        return instance
+# Corresponds to:
+# <items>
+#   <item>milk</item>
+#   <item>bread</item>
+# </items>
 ```
 
-TL;DR: Regular classes for simple parsing, Deserializable for complex streaming behavior.
+### Dictionaries
 
-## Working with Pydantic
-
-GASP integrates seamlessly with Pydantic:
+Dictionaries are parsed from a container tag with `<item>` tags that have a `key` attribute.
 
 ```python
-from pydantic import BaseModel
-from gasp import Parser
+class Config:
+    settings: Dict[str, str]
 
-class UserProfile(BaseModel):
-    username: str
-    email: str
-    is_active: bool = True
-
-# Create parser from Pydantic model
-parser = Parser.from_pydantic(UserProfile)
-
-# Feed LLM output with tags
-llm_output = '<UserProfile>{"username": "alice42", "email": "alice@example.com"}</UserProfile>'
-result = parser.feed(llm_output)
-
-# Access as a proper Pydantic object
-profile = UserProfile.model_validate(parser.validate())
-print(profile.model_dump_json(indent=2))
+# Corresponds to:
+# <settings>
+#   <item key="theme">dark</item>
+#   <item key="font_size">14</item>
+# </settings>
 ```
 
-## How Tags Work
+### Nested Objects
 
-The tag name directly indicates what Python type to instantiate:
-
-```
-<Person>{ ... JSON data ... }</Person>  # Creates a Person instance
-<List>[ ... array data ... ]</List>     # Creates a List
-<Address>{ ... address data ... }</Address>  # Creates an Address
-```
-
-The parser ignores everything outside of the tags, so the LLM can provide explanations, context, or other text alongside the structured data.
-
-## Advanced Templating with Jinja2
-
-GASP provides built-in Jinja2 integration for more advanced prompt templating:
+Nested objects are handled by nesting XML tags that match the class and attribute names.
 
 ```python
-from gasp import Deserializable, render_template
-from typing import List, Optional
-
-class Person(Deserializable):
-    """Information about a person"""
+class Employee:
     name: str
-    age: int
-    hobbies: Optional[List[str]] = None
+    role: str
 
-# Create a template with Jinja2 syntax
-template = """
-# {{ title }}
-
-Generate a {{ type_name|type_description }}.
-
-{% if include_format_instructions %}
-Your response must be formatted as:
-{{ person_type|format_type }}
-{% endif %}
-"""
-
-# Provide template context
-context = {
-    'title': 'Person Generator',
-    'type_name': Person,
-    'include_format_instructions': True,
-    'person_type': Person
-}
-
-# Render the template
-prompt = render_template(template, context)
-```
-
-### Available Jinja2 Filters
-
-- `format_type`: Generates format instructions for a type (e.g., `{{ my_type|format_type }}`)
-- `type_description`: Provides a human-readable description of a type, including docstring info
-
-### Template Files & Inheritance
-
-You can also use template files with inheritance:
-
-```python
-from gasp import render_file_template
-
-# Renders a template file with GASP filters included
-prompt = render_file_template("templates/person_prompt.j2", context)
-```
-
-### Direct Jinja2 Access
-
-For advanced cases, you can use the Jinja2 environment directly:
-
-```python
-from gasp.jinja_helpers import create_type_environment
-
-# Create a Jinja2 environment with GASP filters
-env = create_type_environment()
-
-# Add your own filters
-env.filters["my_filter"] = my_filter_function
-
-# Load templates from a directory
-env.loader = jinja2.FileSystemLoader("templates/")
-
-# Use directly with Jinja2 API
-template = env.get_template("my_template.j2")
-prompt = template.render(**context)
-```
-
-## Customizing Behavior
-
-Need more control? You can customize type conversion, validation, and parsing behavior:
-
-```python
-# Custom type conversions and validation
-class CustomPerson(Deserializable):
+class Company:
     name: str
-    age: int
+    employees: List[Employee]
 
-    @classmethod
-    def __gasp_from_partial__(cls, partial_data):
-        """Add custom validation or pre-processing"""
-        # Normalize name to title case
-        if "name" in partial_data:
-            partial_data["name"] = partial_data["name"].title()
-        return super().__gasp_from_partial__(partial_data)
+# Corresponds to:
+# <Company>
+#   <name>TechCorp</name>
+#   <employees>
+#     <item>
+#       <Employee>
+#         <name>Alice</name>
+#         <role>Engineer</role>
+#       </Employee>
+#     </item>
+#     <item>
+#       <Employee>
+#         <name>Bob</name>
+#         <role>Designer</role>
+#       </Employee>
+#     </item>
+#   </employees>
+# </Company>
 ```
 
-## Migrating from pre-1.0 Versions
+## Advanced Usage
 
-Version 1.0.0 represents a complete architectural shift:
+### Union Types
 
-### What's Been Removed
+GASP can distinguish between types in a `Union` based on the XML tag.
 
-- **WAIL Parser**: The entire WAIL language and validation system has been removed
-- **Schema Validation**: The schema-based approach has been replaced with typed parsing
-- **WAILGenerator**: This class and its API are no longer available
-- All WAIL-related files and examples
-
-### What's New
-
-- **Tag-Based Parsing**: Uses XML-like tags in LLM output to identify data types
-- **Type Annotations**: Direct use of Python type annotations to define structures
-- **Template Helpers**: Functions to generate format instructions from types
-- **Streaming Support**: Improved support for processing data as it arrives
-
-### Migration Steps
-
-1. Replace WAIL schema definitions with Python classes using type annotations
-2. Replace `WAILGenerator` with the new `Parser` class
-3. Update your prompts to use the new tag-based format
-4. Use `template_helpers.interpolate_prompt()` to generate type-aware prompts
-
-Example of old WAIL approach:
 ```python
-schema = r'''
-object Response { name: String, age: Number }
-template GenerateResponse() -> Response { ... }
-'''
-generator = WAILGenerator()
-generator.load_wail(schema)
-(prompt, _, _) = generator.get_prompt()
-llm_response = your_llm_client.generate(prompt)
-parsed_data = generator.parse_llm_output(llm_response)
+class Success:
+    data: str
+
+class Error:
+    message: str
+
+ResponseType = Union[Success, Error]
+
+# The parser will instantiate a `Success` object
+parser = Parser(ResponseType)
+parser.feed("<Success><data>Operation complete.</data></Success>")
+
+# The parser will instantiate an `Error` object
+parser = Parser(ResponseType)
+parser.feed("<Error><message>Permission denied.</message></Error>")
 ```
 
-New approach:
+### Template Generation
+
+You can generate XML format instructions to include in your prompts, guiding the LLM to produce the correct output.
+
 ```python
-from gasp import Parser
 from gasp.template_helpers import interpolate_prompt
 
-# Regular class
-class Person:
-    def __init__(self, name="", age=0):
-        self.name = name
-        self.age = age
-
-# Create a template with a {{return_type}} placeholder
-template = """
-Generate a profile for a person who loves coding.
-
-{{return_type}}
-"""
-
-# Generate a complete prompt with type information
-prompt = interpolate_prompt(template, Person)
+template = "Please generate the data in the following format:\n{{return_type}}"
+prompt = interpolate_prompt(template, Company)
 print(prompt)
-# Output will include:
-# Your response should be formatted as:
-# <Person>{ "name": string, "age": number }</Person>
-
-# Send to your LLM
-llm_response = your_llm_client.generate(prompt)
-
-# Parse the tagged response
-parser = Parser(Person)
-parser.feed(llm_response)
-person = parser.validate()
-
-print(f"Created person: {person.name}, {person.age} years old")
 ```
+
+This will generate a prompt with a clear XML schema for the LLM to follow.
 
 ## Contributing
 
-Contributions welcome! Check out the examples directory to see how things work.
+Contributions are welcome! Please feel free to open an issue or submit a pull request.
 
 ## License
 
