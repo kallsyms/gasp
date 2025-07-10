@@ -120,6 +120,27 @@ impl TagFinder {
                 debug!("[TagFinder::push] Found '<' at index 0. No leading text.");
             }
 
+            // Handle CDATA sections
+            if self.buf[lt..].starts_with("<![CDATA[") {
+                if let Some(cdata_end) = self.buf[lt..].find("]]>") {
+                    let cdata_content = self.buf[lt + 9..lt + cdata_end].to_string();
+                    if self.inside && !self.inside_ignored && !cdata_content.is_empty() {
+                        debug!(
+                            "[TagFinder::push] Emitting Bytes for CDATA: '{}'",
+                            cdata_content
+                        );
+                        emit(TagEvent::Bytes(cdata_content))?;
+                    }
+                    self.buf.drain(..lt + cdata_end + 3);
+                    continue; // Continue to next iteration of the loop
+                } else {
+                    // Incomplete CDATA section, wait for more data
+                    debug!("[TagFinder::push] Incomplete CDATA section. Draining buf up to lt: {}. Remaining buf: '{}'", lt, &self.buf[lt..]);
+                    self.buf.drain(..lt);
+                    return Ok(());
+                }
+            }
+
             /*──────── look for the matching '>' ───────────────────────*/
             let gt = match self.buf[lt..].find('>') {
                 Some(off) => lt + off,
@@ -782,5 +803,73 @@ mod tests {
             close_tags[0], "WantedTag",
             "WantedTag should be the only closed tag"
         );
+    }
+
+    #[test]
+    fn test_cdata_handling() {
+        let mut finder = TagFinder::new();
+        let mut events = Vec::new();
+        let input = r#"<root>some text <![CDATA[with <tags> & entities]]> more text</root>"#;
+
+        finder
+            .push(input, |event| {
+                println!("Event: {:?}", event);
+                events.push(event);
+                Ok(())
+            })
+            .unwrap();
+
+        let mut open_tags = Vec::new();
+        let mut content_chunks = Vec::new();
+        let mut close_tags = Vec::new();
+
+        for event in &events {
+            match event {
+                TagEvent::Open(tag) => open_tags.push(tag.name.clone()),
+                TagEvent::Bytes(content) => content_chunks.push(content.clone()),
+                TagEvent::Close(name, _) => close_tags.push(name.clone()),
+            }
+        }
+
+        // The content inside the CDATA should be treated as raw text
+        let full_content = content_chunks.join("");
+        assert!(full_content.contains("some text"));
+        assert!(full_content.contains("with <tags> & entities"));
+        assert!(full_content.contains("more text"));
+        assert_eq!(
+            full_content.trim(),
+            "some text with <tags> & entities more text"
+        );
+
+        // Check that the tags inside CDATA were not parsed as tags
+        assert_eq!(open_tags, vec!["root"]);
+        assert_eq!(close_tags, vec!["root"]);
+    }
+
+    #[test]
+    fn test_cdata_split_across_chunks() {
+        let mut finder = TagFinder::new();
+        let mut events = Vec::new();
+
+        let chunks = vec!["<root><![CDATA[part1 ", "part2]]> text</root>"];
+
+        for chunk in chunks {
+            finder
+                .push(chunk, |event| {
+                    events.push(event);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let mut content_chunks = Vec::new();
+        for event in &events {
+            if let TagEvent::Bytes(content) = event {
+                content_chunks.push(content.clone());
+            }
+        }
+
+        let full_content = content_chunks.join("");
+        assert_eq!(full_content.trim(), "part1 part2 text");
     }
 }
